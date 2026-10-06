@@ -265,7 +265,6 @@ int text_of(int go) { return (go >= 0 && go < W.nobj) ? W.obj[go].text : -1; }
 int img_of(int go) { return (go >= 0 && go < W.nobj) ? W.obj[go].img : -1; }
 
 #include <stdio.h>
-#include "g_input.h"
 void anim_event(int go, int fn, int iarg, float farg)
 {
     g_send_event(go, fn, iarg, farg);
@@ -312,12 +311,13 @@ void g_collision_enter(int go, int other_go, float rel)
     }
 }
 
+/* the game may redirect scene requests (e.g. a demo build without some scenes) */
+static int (*scene_filter)(int scene);
+void g_scene_filter(int (*fn)(int scene)) { scene_filter = fn; }
+
 void g_scene_request(int scene)
 {
-#if AW_DEMO_DATA
-    if (scene > 2) scene = 0;            /* chapters 3-13 are not in the demo data */
-#endif
-    requested_scene = scene;
+    requested_scene = scene_filter ? scene_filter(scene) : scene;
 }
 int g_scene_pending(void) { return requested_scene; }
 

@@ -54,6 +54,7 @@ void g_collision_enter(int go, int other_go, float rel_speed);
 
 void g_update(float udt);                             /* one frame of the game */
 void g_scene_request(int scene);
+void g_scene_filter(int (*fn)(int scene));   /* game hook: may change a requested scene */
 int g_scene_pending(void);
 void g_scene_switch(void);
 #endif
