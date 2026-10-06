@@ -18,6 +18,8 @@ The game supports external translation packages using a `LANG.PAK` file.
 
 If `LANG.PAK` is present in the same folder as the game, it will be loaded automatically. If no `LANG.PAK` is found, the game falls back to the built-in English translation stored inside `AW.PAK`.
 
+With a `LANG.PAK` installed, the main menu shows **Settings > Language**, which switches between the translation and English at any time (the choice is saved).
+
 The translation system covers the game's text (menus, chapter briefings, dialogue and the texts placed in the game's scenes), excluding text that is pre-rendered directly into image assets from the original game.
 
 ### Make your own translation

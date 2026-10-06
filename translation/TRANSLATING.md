@@ -70,6 +70,7 @@ Two optional files cover text that is not in the 16 files:
   translate the texts under `"m"`:
   * `"21"`: the dash prompt `[button: SQUARE / R]` (the PC version names a keyboard key here)
   * `"64"`: `Port by`, the role shown in the credits above the name of the PSP port's author
+  * `"66"`: `Language`, the option in Settings that switches between your translation and English
 
   The numbers are line numbers counted from 0 (line 1 in your editor is `"0"`). Leave the
   `_fixed` part out or unchanged: it holds the author's name, which is the same in every language.
@@ -106,7 +107,9 @@ PSP/GAME/Awaria/
   LANG.PAK      <- your translation
 ```
 
-To go back to English, delete `LANG.PAK`. You can also test in PPSSPP the same way.
+With a `LANG.PAK` installed, the main menu gets a **Settings** page with a **Language** option:
+it switches between the translation and the built-in English, and the choice is remembered.
+To remove the translation completely, delete `LANG.PAK`. You can also test in PPSSPP the same way.
 
 ## 5. Letters and alphabets
 
