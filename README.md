@@ -1,6 +1,6 @@
 # awaria-psp
 
-A work-in-progress C remake/port of **Awaria** by **vanripper** for the **PlayStation Portable (PSP)**.
+A work-in-progress C demake of **Awaria** by **vanripper** for the **PlayStation Portable (PSP)**.
 
 ## Current Progress
 
