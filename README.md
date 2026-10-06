@@ -33,15 +33,20 @@ Latin alphabets with accents, Greek and Cyrillic work out of the box. Chinese, J
 
 The full step by step guide is in [translation/TRANSLATING.md](translation/TRANSLATING.md). The tool sources are in [translation/](translation/).
 
-### Planned Languages at Launch
+### Languages
+
+Ready:
 
 - English -- built into `AW.PAK`
+- Polish -- by **EnderSpulka**, in [translations/Polski](translations/Polski)
+
+Planned at launch:
+
 - French
 - German
-- Polish
 - Spanish
 
-More translations can be added through custom `LANG.PAK` files. Made one? Open an issue and share it.
+Translations live in [translations/](translations/), one folder per language (the translated text files). Build a `LANG.PAK` from any of them with the translation kit. Made one? Open an issue and share it.
 
 ## XMB Art
 
@@ -60,5 +65,7 @@ The whole game is playable from start to finish and is now in real hardware test
 ## Credits
 
 **Awaria** was originally created by **vanripper**.
+
+Polish translation by **EnderSpulka**.
 
 This project is an unofficial fan-made C remake/PSP port and is not affiliated with or endorsed by vanripper.

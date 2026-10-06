@@ -40,6 +40,8 @@ def main():
         # a trailing empty line is just the file's last newline
         while len(lines) > n_en and lines[-1] == "":
             lines.pop()
+        if len(lines) < n_en and not any(english[nm][len(lines):]):
+            lines += [""] * (n_en - len(lines))       # only trailing empty lines missing: fine
         if len(lines) != n_en:
             problems.append("%s.json has %d lines, English has %d: lines are matched by number, check for "
                             "added/removed lines" % (nm, len(lines), n_en))
@@ -48,7 +50,15 @@ def main():
         print("  %-8s %d lines" % (nm + ".json", len(lines)))
 
     psp_path = os.path.join(a.folder, "psp.json")
-    psp = json.load(open(psp_path, encoding="utf-8")) if os.path.exists(psp_path) else psp_en
+    if os.path.exists(psp_path):
+        psp = json.load(open(psp_path, encoding="utf-8"))
+    else:
+        psp = psp_en
+        changed = ["%s.json line %s" % (nm, k) for nm, e in psp_en.items() if not nm.startswith("_") and
+                   os.path.exists(os.path.join(a.folder, nm + ".json")) for k in e]
+        if changed:
+            problems.append("no psp.json: these lines use the English PSP wording: " + ", ".join(changed) +
+                            " (copy langkit/english/psp.json to your folder and translate it)")
     texts = langpak.apply_psp(texts, psp)
     static_path = os.path.join(a.folder, "static.json")
     static = {}
@@ -57,6 +67,22 @@ def main():
         unknown = [k for k in static if k not in static_orig]
         for k in unknown:
             problems.append("static.json: %r is not a text of the game (keys must stay English)" % k)
+
+    # scene texts that are also lines of the text files (e.g. "PLEASE CONFIRM", m.json line 16) follow
+    # the translated line automatically, unless static.json says otherwise
+    by_line = {}
+    for nm in langpak.TEXT_FILES:
+        for en_l, tr_l in zip(english[nm], texts[nm]):
+            if en_l.strip() and tr_l.strip() and en_l != tr_l:
+                by_line.setdefault(en_l.strip().lower(), tr_l.strip())
+    auto = 0
+    for orig in static_orig:
+        tr = by_line.get(orig.strip().lower())
+        if tr and orig not in static:
+            static[orig] = tr.upper() if orig.isupper() else tr
+            auto += 1
+    if auto:
+        print("  %d scene texts follow their translated text file lines" % auto)
 
     name = a.name or os.path.basename(os.path.normpath(a.folder))
     data, missing = langpak.build(fontsets, faces, texts, static, static_orig, name, a.font)

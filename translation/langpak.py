@@ -19,7 +19,7 @@ Layout (little endian, offsets from the start of the file, glyph pages 64-byte a
   Text    {u32 off, size, nlines}   lines are UTF-8, each ended by '\\0'
   Static  {u32 crc32(original), u32 off}   sorted by crc; translated UTF-8 string, '\\0' ended
 """
-import json, math, os, struct, zlib
+import json, math, os, struct, unicodedata, zlib
 import numpy as np
 from PIL import Image, ImageFont, ImageDraw
 
@@ -145,6 +145,93 @@ class SdfFace:
         bx = (bxu - pad / gscale) * s + bb[0]
         by = -(byu + pad / gscale) * s + bb[1]
         return gim, bx, by, adv
+
+
+# spacing forms of the combining accents (fonts carry these even when they lack the accented letters)
+MARKS = {0x301: "\u00b4", 0x300: "`", 0x302: "\u02c6", 0x308: "\u00a8", 0x303: "\u02dc", 0x30C: "\u02c7",
+         0x328: "\u02db", 0x307: "\u02d9", 0x30A: "\u02da", 0x327: "\u00b8", 0x306: "\u02d8", 0x30B: "\u02dd",
+         0x304: "\u00af"}
+STROKE = {"\u0141": "L", "\u0142": "l", "\u0110": "D", "\u0111": "d", "\u00d8": "O", "\u00f8": "o"}
+
+
+class ComposedFace:
+    """Accented letters a font lacks, built in that font's own style: its base letter plus the accent
+    (from the font, else from the mark font), or a drawn stroke for Ł, Đ, Ø.  Keeps translated titles
+    in the condensed Sturkopf font instead of mixing in letters of another font."""
+
+    def __init__(self, face, mark_face):
+        self.face, self.marks = face, mark_face
+        self.name = face.name + "+composed"
+
+    def _mark(self, ch, px, base_w, base_h, below):
+        r = self.face.render(ord(ch), px) or self.marks.render(ord(ch), px)
+        if not r or r[0] is None:
+            return None
+        im = r[0]
+        # size the accent to this letter (marks of a wider font would dwarf a condensed one)
+        k = min(1.0, (0.25 if below else 0.2) * base_h / im.height, (0.4 if below else 0.6) * base_w / im.width)
+        if k < 1.0:
+            im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
+        return im
+
+    def render(self, cp, px):
+        ch = chr(cp)
+        stroke = STROKE.get(ch)
+        if stroke:
+            base, marks = stroke, []
+        else:
+            d = unicodedata.normalize("NFD", ch)
+            base, marks = d[0], [ord(m) for m in d[1:]]
+            if len(d) < 2 or any(m not in MARKS for m in marks):
+                return None
+        r = self.face.render(ord(base), px)
+        if not r or r[0] is None:
+            return None
+        bim, bx, by, adv = r
+        pad = max(4, int(px))
+        W, H = bim.width + 2 * pad, bim.height + 3 * pad
+        canvas = np.zeros((H, W), np.float32)
+        ox, oy = pad, 2 * pad                                  # where the base glyph sits on the canvas
+        canvas[oy:oy + bim.height, ox:ox + bim.width] = np.asarray(bim, np.float32)
+        x0, x1, top, bottom = ox, ox + bim.width, oy, oy + bim.height
+        gap = max(1, round(bim.height * 0.07))
+        for m in marks:
+            mim = self._mark(MARKS[m], px, bim.width, bim.height, m in (0x328, 0x327))
+            if mim is None:
+                return None
+            a = np.asarray(mim, np.float32)
+            mh, mw = a.shape
+            if m == 0x328:            # ogonek: hangs under the right side
+                mx, my = x1 - mw, bottom - max(1, round(mh * 0.2))
+            elif m == 0x327:          # cedilla: under the middle
+                mx, my = round((x0 + x1 - mw) / 2), bottom
+            else:                     # everything else sits above
+                mx, my = round((x0 + x1 - mw) / 2), top - gap - mh
+                top = my
+            mx, my = max(0, min(W - mw, mx)), max(0, min(H - mh, my))
+            canvas[my:my + mh, mx:mx + mw] = np.maximum(canvas[my:my + mh, mx:mx + mw], a)
+        if stroke:
+            im = Image.fromarray(canvas.astype(np.uint8), "L")
+            dr = ImageDraw.Draw(im)
+            t = max(1, round(px * 0.09))
+            w, h = bim.width, bim.height
+            if stroke in "Ll":        # diagonal bar through the stem
+                sx = x0 + (w * 0.15 if stroke == "L" else w / 2)
+                ym = top + h * (0.55 if stroke == "L" else 0.5)
+                span = max(w * 0.6, h * 0.2)
+                dr.line((sx - span * 0.3, ym + span * 0.25, sx + span * 0.5, ym - span * 0.25), fill=255, width=t)
+            elif stroke in "Dd":      # horizontal bar across the left stem
+                sx = x0 + (w * 0.12 if stroke == "D" else w * 0.75)
+                ym = top + h * (0.5 if stroke == "D" else 0.3)
+                dr.line((sx - w * 0.22, ym, sx + w * 0.3, ym), fill=255, width=t)
+            else:                     # O: slash
+                dr.line((x0 - 1, bottom, x1, top), fill=255, width=t)
+            canvas = np.asarray(im, np.float32)
+        out = Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8), "L")
+        bb = out.getbbox()
+        if not bb:
+            return None
+        return out.crop(bb), bx + (bb[0] - ox), by + (bb[1] - oy), adv
 
 
 class TtfFace:
@@ -289,7 +376,7 @@ def build(fontsets, faces, texts, static_map, static_originals, name, extra_font
         face = faces[fi]
         s = px / face.point
         first = len(glyph_rows)
-        chain = [face] + ([faces[sdf_fallback]] if fi != sdf_fallback else []) + \
+        chain = [face, ComposedFace(face, faces[sdf_fallback])] + ([faces[sdf_fallback]] if fi != sdf_fallback else []) + \
                 [f for f in faces if isinstance(f, BitmapFace)] + ttfs
         for cp in cps:
             r = None
