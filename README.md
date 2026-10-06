@@ -1,24 +1,50 @@
 # awaria-psp
 
-A work-in-progress C demake of **Awaria** by **vanripper** for the **PlayStation Portable (PSP)**.
+A C demake of **Awaria** by **vanripper** for the **PlayStation Portable (PSP)**.
 
-## Current Progress
+## Features
 
-- All 13 chapters, the final boss, cutscenes and the credits are playable
+- All 13 chapters, the final boss, cutscenes and the credits
 - Main menu, chapter select, difficulty modes, pause menu and saves
-- Finished the XMB artwork, animated XMB icon and XMB music
-- Converted and formatted the music for PSP
+- XMB artwork, animated XMB icon and XMB music
+- The game's music, converted and streamed for PSP
 - Performance pass for real hardware (chapter 5 and the finale)
-- Working translation package system (`LANG.PAK`) with public translation tools
-- Currently being playtested on a real PSP-3000 before release
+- Translation packages (`LANG.PAK`) with public translation tools, and Polish, Spanish and French ready to use
 
-## Demo
+This demake is heavily based on the code of my PSP Helltaker demake: [helltaker-psp](https://github.com/surelynotvain/helltaker-psp). Both run on the same engine, **Vain's C Portable Engine**.
 
-A playable **demo with Chapter 1 and Chapter 2** is on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases). The rest of the chapters are not finished yet.
+## Download
 
-**PSP-1000 owners:** please try the demo and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to tell me if it works (starts, runs smoothly, any crash or freeze). It is tested on a PSP-3000 and in PPSSPP so far.
+The full game, **version 1.0**, is on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases/latest): download `Awaria-PSP.zip`.
 
-This demake is heavily based on the code of my PSP Helltaker demake: [helltaker-psp](https://github.com/surelynotvain/helltaker-psp).
+The older **demo** (Chapters 1 and 2) is still on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases/tag/v0.2-demo).
+
+## Installation
+
+1. Unzip `Awaria-PSP.zip`
+2. Copy the `PSP` folder to the root of your memory stick (it adds `PSP/GAME/Awaria` with `EBOOT.PBP`, `AW.PAK` and `MUSIC.PAK`)
+3. Start **Awaria** from the XMB (Game > Memory Stick)
+
+Needs a PSP with custom firmware (for example ARK-4). The save (`SETTINGS.BIN`) is kept in the game folder; keep it when you update.
+
+## Controls
+
+| Button | Action |
+|---|---|
+| D-pad / analog stick | Move |
+| Cross | Interact, confirm |
+| Square / R | Dash |
+| Start | Pause |
+
+## Compatibility
+
+| Model | Status |
+|---|---|
+| PSP-2000 / 3000 / Street | Supported (playtested on a PSP-3000) |
+| PSP Go | Supported |
+| PSP-1000 | Not supported yet: the final chapter needs more memory than the PSP-1000 has. A later update will make it fit. The demo (Chapters 1 and 2) should work, feedback welcome |
+
+**PSP-1000 owners:** please try the demo and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to tell me if it works (starts, runs smoothly, any crash or freeze).
 
 ## Translations
 
@@ -34,7 +60,7 @@ The translation system covers the game's text (menus, chapter briefings, dialogu
 
 Anyone can make a `LANG.PAK`, no PSP toolchain needed:
 
-1. Get `Awaria-PSP-LangKit.zip` (the tools plus the fonts and English text files). It will be on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases) together with the game
+1. Get `Awaria-PSP-LangKit.zip` (the tools plus the fonts and English text files) from the [Releases page](https://github.com/surelynotvain/awaria-psp/releases/latest)
 2. Translate the game's text files (the same files as `Awaria/local` in the PC game, one text per line). Existing PC translations work as they are
 3. Build it: `python mklang.py MyLanguage --name MyLanguage` (needs Python 3 with `pip install pillow numpy`)
 4. Copy `LANG.PAK` next to `EBOOT.PBP` in `PSP/GAME/Awaria/`
@@ -68,15 +94,13 @@ Translations live in [translations/](translations/), one folder per language (th
 
 ## Status
 
-**Work in progress.**
-
-A demo with Chapter 1 and Chapter 2 is out. The other chapters are still being finished and tested on real hardware before the full release. The translation tools and the guide are published so translators can get started before launch.
+**Version 1.0: the full game is out.** Next: PSP-1000 support and fixes from your bug reports ([open an issue](https://github.com/surelynotvain/awaria-psp/issues) with your PSP model and what happened).
 
 ## Credits
 
 **Awaria** was originally created by **vanripper**.
 
-PSP port by **surelynotvain**.
+PSP port by **surelynotvain**, built on Vain's C Portable Engine.
 
 Translations: Polish by **EnderSpulka**, Spanish by **mod3us**, French by **Supershadow30**. Thank you!
 
