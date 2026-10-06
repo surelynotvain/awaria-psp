@@ -95,6 +95,10 @@ Made a translation (German is still missing)? [Open an issue](https://github.com
 
 The XMB entry has its own artwork, an animated icon (a Chapter 1 run) and background music.
 
+## Source code
+
+The engine source is in [engine/](engine/): **Vain's C Portable Engine 2**, the base shared with Helltaker PSP plus a small Unity-style runtime (scenes, animator, physics, pathfinding), and the Awaria game code on top of it. Game assets, converted game data and the converter are not included.
+
 ## Reporting bugs
 
 Please [open an issue](https://github.com/surelynotvain/awaria-psp/issues) with:
