@@ -203,6 +203,56 @@ static void read_input(void)
     prev = held;
 }
 
+#if AW_DEMO_DATA
+/* chapters 3-13 are not in the demo data */
+static int demo_scene(int scene) { return scene > 2 ? 0 : scene; }
+#endif
+
+/* ------------------------------------------------------------ start-up checks
+ * Wrong data files used to give a blank red screen. Now the player reads what is wrong and how to fix it. */
+#if AW_DEMO_DATA
+#define AW_VERSION "0.21 demo"   /* keep in step with tools/mksfo.py */
+#else
+#define AW_VERSION "1.01"
+#endif
+
+static void start_fail(const char *what)
+{
+    static char msg[900];
+    char dir[256];
+    vcpe_path(dir, sizeof dir, "");
+    snprintf(msg, sizeof msg, "%s\n\nFix: copy the whole PSP/GAME/%s folder again from one download (EBOOT.PBP, "
+             "AW.PAK and MUSIC.PAK belong together). Make sure the memory stick has enough free space and the "
+             "copy finished.\n\nGame folder: %s\nVersion %s, data %s",
+             what, AW_DEMO_DATA ? "AwariaDemo" : "Awaria", dir, AW_VERSION, PAK_HASH);
+    vcpe_gfx_shutdown();
+    vcpe_fatal("Awaria PSP could not start", msg);
+}
+
+/* AW.PAK must exist, be complete (its header holds its own length) and belong to this EBOOT */
+static void check_pak(const char *path)
+{
+    char why[200];
+    SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    if (fd < 0)
+        start_fail("AW.PAK was not found next to EBOOT.PBP.");
+    uint32_t want = STR_OFF + STR_SIZE, head[2] = {0, 0};
+    int size = sceIoLseek32(fd, 0, PSP_SEEK_END);
+    sceIoLseek32(fd, 0, PSP_SEEK_SET);
+    sceIoRead(fd, head, sizeof head);
+    sceIoClose(fd);
+    if (size < 8 || (head[1] > (uint32_t)size && head[1] <= 512u * 1024 * 1024)) {
+        snprintf(why, sizeof why, "AW.PAK is incomplete: only %d of %u bytes are there.", size,
+                 (unsigned)(size < 8 ? want : head[1]));
+        start_fail(why);
+    }
+    if ((uint32_t)size != want || head[1] != want) {
+        snprintf(why, sizeof why, "AW.PAK does not belong to this EBOOT.PBP (it has %d bytes, this version needs "
+                 "%u). The files come from different versions or downloads.", size, (unsigned)want);
+        start_fail(why);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     vcpe_sys_init(argc, argv);
@@ -211,19 +261,22 @@ int main(int argc, char *argv[])
     prefs_load(p);
     gfx_init();
     vcpe_path(p, sizeof p, "AW.PAK");
-    int ok = gfx_pak_open(p) >= 0;
-    vcpe_path(p, sizeof p, "LANG.PAK");
-    if (ok)
-        ok = gfx_lang_load(p, prefs_int("lang", 1)) >= 0;
-    printf("[aw] language %s\n", lang_name());
-    if (!ok) {
-        while (vcpe_running) {
-            gfx_begin(RGBA(120, 0, 0, 255));
-            gfx_end();
-        }
-        return 0;
+    check_pak(p);
+    if (gfx_pak_open(p) < 0) {
+        snprintf(p, sizeof p, "Could not read the graphics from AW.PAK (free memory: %d KB). The memory "
+                 "stick may have read errors, or a plugin may be using memory: try again with plugins off.",
+                 (int)(sceKernelMaxFreeMemSize() / 1024));
+        start_fail(p);
     }
+    vcpe_path(p, sizeof p, "LANG.PAK");
+    if (gfx_lang_load(p, prefs_int("lang", 1)) < 0)
+        start_fail("The text inside AW.PAK could not be read: the file is damaged or from a different version.");
+    printf("[aw] language %s\n", lang_name());
     vcpe_path(p, sizeof p, "MUSIC.PAK");
+    SceUID mfd = sceIoOpen(p, PSP_O_RDONLY, 0);
+    if (mfd < 0)
+        start_fail("MUSIC.PAK was not found next to EBOOT.PBP.");
+    sceIoClose(mfd);
     audio_init(p);
     music_set_volume10(10.0f);
     sfx_set_volume10(10.0f);
@@ -233,6 +286,9 @@ int main(int argc, char *argv[])
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
     script_load();
     srand(g_autotest ? 12345u : sceKernelGetSystemTimeLow());   /* test runs are repeatable */
+#if AW_DEMO_DATA
+    g_scene_filter(demo_scene);
+#endif
     g_scene_request(0);
     SceInt64 last = sceKernelGetSystemTimeWide();
     while (vcpe_running) {

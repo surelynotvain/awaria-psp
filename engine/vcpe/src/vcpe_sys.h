@@ -8,5 +8,6 @@ extern volatile int vcpe_resume_gen;   /* bumped after every sleep/resume: file 
 void vcpe_sys_init(int argc, char **argv);              /* callbacks thread, 333 MHz, game folder */
 void vcpe_path(char *out, int n, const char *file);    /* "ms0:/PSP/GAME/<game>/" + file */
 void vcpe_quit(void);
+void vcpe_fatal(const char *title, const char *text);   /* readable start-up error, never returns */
 
 #endif

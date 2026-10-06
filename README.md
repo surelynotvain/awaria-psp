@@ -62,6 +62,16 @@ You need a PSP with custom firmware (for example ARK-4). Your save (`SETTINGS.BI
 
 **PSP-1000 owners:** the [demo](https://github.com/surelynotvain/awaria-psp/releases/tag/v0.2-demo) should run on your model. Please try it and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to say how it went.
 
+## Troubleshooting
+
+**The game shows a message instead of starting (1.0.1 and newer), or a plain red screen (1.0 and the demo).** One of the game files is missing, was not copied completely, or comes from a different download. Since 1.0.1 the message says which one and how big the files should be. To fix it:
+
+1. Delete `PSP/GAME/Awaria` from the memory stick
+2. Unzip `Awaria-PSP.zip` again and copy the whole `PSP` folder over (`EBOOT.PBP`, `AW.PAK` and `MUSIC.PAK` must come from the same download)
+3. Check that the memory stick has enough free space (about 170 MB) and that the copy finished before you remove the stick
+
+Still stuck? [Open an issue](https://github.com/surelynotvain/awaria-psp/issues) with a photo of the message.
+
 ## Languages
 
 English is built in. These translations are ready to use:

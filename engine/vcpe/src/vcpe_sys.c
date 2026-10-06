@@ -1,5 +1,7 @@
 /* VCPE system: HOME / sleep callbacks, CPU clock, files next to the EBOOT. */
 #include <pspkernel.h>
+#include <pspdebug.h>
+#include <pspdisplay.h>
 #include <psppower.h>
 #include <string.h>
 #include <stdio.h>
@@ -60,3 +62,39 @@ void vcpe_path(char *out, int n, const char *file)
 }
 
 void vcpe_quit(void) { vcpe_running = 0; }
+
+/* A start-up problem the player has to fix (missing or broken data files): plain text on the debug
+ * screen, which needs no game data. Call vcpe_gfx_shutdown() first if the renderer is running.
+ * Stays until HOME > Exit. */
+void vcpe_fatal(const char *title, const char *text)
+{
+    pspDebugScreenInit();
+    pspDebugScreenSetBackColor(0xFF000028);   /* dark red (ABGR), like the old red screen */
+    pspDebugScreenClear();
+    pspDebugScreenSetTextColor(0xFF5050FF);
+    pspDebugScreenPrintf("\n %s\n\n", title);
+    pspDebugScreenSetTextColor(0xFFFFFFFF);
+    /* the debug font is 8 px wide: 60 columns; wrap the text at spaces */
+    char line[64];
+    const char *p = text;
+    while (*p) {
+        int n = 0, cut = -1;
+        while (p[n] && p[n] != '\n' && n < 58) {
+            if (p[n] == ' ')
+                cut = n;
+            n++;
+        }
+        if (p[n] && p[n] != '\n' && cut > 0)
+            n = cut;
+        snprintf(line, sizeof line, "%.*s", n, p);
+        pspDebugScreenPrintf(" %s\n", line);
+        p += n;
+        if (*p == ' ' || *p == '\n')
+            p++;
+    }
+    pspDebugScreenSetTextColor(0xFFA0A0A0);
+    pspDebugScreenPrintf("\n Press HOME to quit.\n");
+    while (vcpe_running)
+        sceDisplayWaitVblankStart();
+    sceKernelExitGame();
+}
