@@ -1,7 +1,12 @@
 # awaria-psp
 
 Current progress:
-Finished XMB art, imported menu logic, created XMB icon, extracted assets, formated music, 
+Finished XMB art, imported menu logic, created XMB icon, extracted assets, formated music, working tranlation pakage for people to be able to tranlsate the game exept the prebaked asset images from games original files. It will be as LANG.PAK, if LANG.PAK not present in same folder it will fallback to the English version, on lunch planned languages:
+French
+German
+Polish
+English (built in)
+Spanish
 
 XMB art:
 
