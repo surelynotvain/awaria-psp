@@ -26,7 +26,7 @@ from PIL import Image, ImageFont, ImageDraw
 MAGIC = b"AWLG"
 VERSION = 1
 TEXT_FILES = ["m", "ch", "g"] + [str(i) for i in range(1, 14)]
-BASE_CHARS = set(chr(c) for c in range(32, 127)) | set("★•…’‘“”-–")
+BASE_CHARS = set(chr(c) for c in range(32, 127)) | set("\u2605\u2022\u2026\u2019\u2018\u201c\u201d\u2014\u2013")   # star, bullet, ellipsis, quotes, dashes
 HDR = "<4sIHHIIIIIIIIII28s"
 
 
