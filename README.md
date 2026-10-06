@@ -45,16 +45,16 @@ The full step by step guide is in [translation/TRANSLATING.md](translation/TRANS
 
 ### Languages
 
-Ready:
+Ready (ready-made `LANG.PAK` files are on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases)):
 
 - English -- built into `AW.PAK`
 - Polish -- by **EnderSpulka**, in [translations/Polski](translations/Polski)
+- Spanish -- by **mod3us**, in [translations/Espanol](translations/Espanol)
+- French -- by **Supershadow30**, in [translations/Francais](translations/Francais)
 
-Planned at launch:
+Planned:
 
-- French
 - German
-- Spanish
 
 Translations live in [translations/](translations/), one folder per language (the translated text files). Build a `LANG.PAK` from any of them with the translation kit. Made one? Open an issue and share it.
 
@@ -78,6 +78,6 @@ A demo with Chapter 1 and Chapter 2 is out. The other chapters are still being f
 
 PSP port by **surelynotvain**.
 
-Polish translation by **EnderSpulka**.
+Translations: Polish by **EnderSpulka**, Spanish by **mod3us**, French by **Supershadow30**. Thank you!
 
 This project is an unofficial fan-made C remake/PSP port and is not affiliated with or endorsed by vanripper.

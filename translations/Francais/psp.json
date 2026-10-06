@@ -1,0 +1,8 @@
+{
+ "_note": "PSP wording for PC-only prompts, and lines the PSP port adds (m 64: credits role 'Port by', m 66: Settings > Language): file -> line number (0-based) -> text",
+ "m": {
+  "21": "[Bouton : CARRÉ / R]",
+  "64": "Portage PSP",
+  "66": "Langue"
+ }
+}
