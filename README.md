@@ -12,6 +12,14 @@ A work-in-progress C demake of **Awaria** by **vanripper** for the **PlayStation
 - Working translation package system (`LANG.PAK`) with public translation tools
 - Currently being playtested on a real PSP-3000 before release
 
+## Demo
+
+A playable **demo with Chapter 1 and Chapter 2** is on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases). The rest of the chapters are not finished yet.
+
+**PSP-1000 owners:** please try the demo and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to tell me if it works (starts, runs smoothly, any crash or freeze). It is tested on a PSP-3000 and in PPSSPP so far.
+
+This demake is heavily based on the code of my PSP Helltaker demake: [helltaker-psp](https://github.com/surelynotvain/helltaker-psp).
+
 ## Translations
 
 The game supports external translation packages using a `LANG.PAK` file.
@@ -62,7 +70,7 @@ Translations live in [translations/](translations/), one folder per language (th
 
 **Work in progress.**
 
-The whole game is playable from start to finish and is now in real hardware testing. The game is not released yet. The translation tools and the guide are published now so translators can get familiar with them before launch.
+A demo with Chapter 1 and Chapter 2 is out. The other chapters are still being finished and tested on real hardware before the full release. The translation tools and the guide are published so translators can get started before launch.
 
 ## Credits
 
