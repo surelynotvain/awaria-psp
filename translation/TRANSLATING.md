@@ -66,9 +66,14 @@ Deutsch/
 
 Two optional files cover text that is not in the 16 files:
 
-* **`psp.json`**: lines the port changes for the PSP, for example the dash prompt
-  `[button: SQUARE / R]` instead of the PC key. Copy `langkit/english/psp.json` and translate the
-  texts. The numbers are line numbers counted from 0 (line 1 in your editor is `"0"`).
+* **`psp.json`**: lines the port changes or adds for the PSP. Copy `langkit/english/psp.json` and
+  translate the texts under `"m"`:
+  * `"21"`: the dash prompt `[button: SQUARE / R]` (the PC version names a keyboard key here)
+  * `"64"`: `Port by`, the role shown in the credits above the name of the PSP port's author
+
+  The numbers are line numbers counted from 0 (line 1 in your editor is `"0"`). Leave the
+  `_fixed` part out or unchanged: it holds the author's name, which is the same in every language.
+  Lines you do not translate stay English (mklang tells you which).
 * **`static.json`**: texts that are part of the game's scenes instead of the text files, like
   `READY TO KISS`, `GET READY!`, `LOW TIER Specter` and the gallery notes. Copy
   `langkit/english/static.json`, keep the left side (English) as it is and translate the right side.

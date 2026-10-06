@@ -342,14 +342,20 @@ def load_kit(kit):
     return fontsets, faces, texts, psp, static
 
 
-def apply_psp(texts, psp):
+def apply_psp(texts, psp, fixed=None):
+    """PSP lines over the text files; _fixed (from the kit) holds lines that are the same in every language"""
     out = {nm: list(lines) for nm, lines in texts.items()}
-    for nm, entries in psp.items():
-        if nm.startswith("_"):
-            continue
+    merged = {}
+    for src in (psp, (fixed if fixed is not None else psp).get("_fixed", {})):
+        for nm, entries in src.items():
+            if not nm.startswith("_"):
+                merged.setdefault(nm, {}).update(entries)
+    for nm, entries in merged.items():
         for k, v in entries.items():
             i = int(k)
-            if nm in out and 0 <= i < len(out[nm]):
+            if nm in out and i >= 0:
+                if i >= len(out[nm]):                 # lines the port adds after the end of a file
+                    out[nm] += [""] * (i + 1 - len(out[nm]))
                 out[nm][i] = v
     return out
 

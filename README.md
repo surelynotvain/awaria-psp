@@ -66,6 +66,8 @@ The whole game is playable from start to finish and is now in real hardware test
 
 **Awaria** was originally created by **vanripper**.
 
+PSP port by **surelynotvain**.
+
 Polish translation by **EnderSpulka**.
 
 This project is an unofficial fan-made C remake/PSP port and is not affiliated with or endorsed by vanripper.

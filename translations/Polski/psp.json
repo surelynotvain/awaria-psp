@@ -1,6 +1,7 @@
 {
- "_note": "PSP wording for PC-only prompts: file -> line number (0-based) -> text",
+ "_note": "PSP wording for PC-only prompts, and lines the PSP port adds (m 64: credits role 'Port by'): file -> line number (0-based) -> text",
  "m": {
-  "21": "[przycisk: KWADRAT / R]"
+  "21": "[przycisk: KWADRAT / R]",
+  "64": "Port na PSP"
  }
 }

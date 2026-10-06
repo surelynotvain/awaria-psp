@@ -50,16 +50,18 @@ def main():
         print("  %-8s %d lines" % (nm + ".json", len(lines)))
 
     psp_path = os.path.join(a.folder, "psp.json")
-    if os.path.exists(psp_path):
-        psp = json.load(open(psp_path, encoding="utf-8"))
-    else:
-        psp = psp_en
-        changed = ["%s.json line %s" % (nm, k) for nm, e in psp_en.items() if not nm.startswith("_") and
-                   os.path.exists(os.path.join(a.folder, nm + ".json")) for k in e]
-        if changed:
-            problems.append("no psp.json: these lines use the English PSP wording: " + ", ".join(changed) +
-                            " (copy langkit/english/psp.json to your folder and translate it)")
-    texts = langpak.apply_psp(texts, psp)
+    # psp.json: English PSP lines, overridden line by line by the translation's psp.json
+    psp = {nm: dict(e) for nm, e in psp_en.items() if not nm.startswith("_")}
+    mine = json.load(open(psp_path, encoding="utf-8")) if os.path.exists(psp_path) else {}
+    for nm, e in mine.items():
+        if not nm.startswith("_"):
+            psp.setdefault(nm, {}).update(e)
+    untranslated = ["%s.json line %s" % (nm, k) for nm, e in psp_en.items() if not nm.startswith("_")
+                    for k in e if mine.get(nm, {}).get(k) is None]
+    if untranslated:
+        problems.append("psp.json: still English: " + ", ".join(untranslated) +
+                        " (copy langkit/english/psp.json to your folder and translate it)")
+    texts = langpak.apply_psp(texts, psp, fixed=psp_en)
     static_path = os.path.join(a.folder, "static.json")
     static = {}
     if os.path.exists(static_path):
