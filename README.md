@@ -24,7 +24,7 @@ The translation system covers the game's text (menus, chapter briefings, dialogu
 
 Anyone can make a `LANG.PAK`, no PSP toolchain needed:
 
-1. Download `Awaria-PSP-LangKit.zip` from the [Releases page](https://github.com/surelynotvain/awaria-psp/releases)
+1. Get `Awaria-PSP-LangKit.zip` (the tools plus the fonts and English text files). It will be on the [Releases page](https://github.com/surelynotvain/awaria-psp/releases) together with the game
 2. Translate the game's text files (the same files as `Awaria/local` in the PC game, one text per line). Existing PC translations work as they are
 3. Build it: `python mklang.py MyLanguage --name MyLanguage` (needs Python 3 with `pip install pillow numpy`)
 4. Copy `LANG.PAK` next to `EBOOT.PBP` in `PSP/GAME/Awaria/`
@@ -55,7 +55,7 @@ More translations can be added through custom `LANG.PAK` files. Made one? Open a
 
 **Work in progress.**
 
-The whole game is playable from start to finish and is now in real hardware testing. The game itself is not released yet; the translation tools are available now so translations can be ready at launch.
+The whole game is playable from start to finish and is now in real hardware testing. The game is not released yet. The translation tools and the guide are published now so translators can get familiar with them before launch.
 
 ## Credits
 

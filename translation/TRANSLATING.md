@@ -5,8 +5,9 @@ The PSP port reads all of its text from one file, `LANG.PAK`. If `LANG.PAK` sits
 uses its built-in English.
 
 You make a `LANG.PAK` from the game's own text files with the `mklang.py` script of the
-**translation kit**. Download `Awaria-PSP-LangKit.zip` from the
-[Releases page](https://github.com/surelynotvain/awaria-psp/releases) and unzip it. It contains:
+**translation kit**, `Awaria-PSP-LangKit.zip`, published on the
+[Releases page](https://github.com/surelynotvain/awaria-psp/releases) together with the game.
+Unzip it. It contains:
 
 ```
 Awaria-PSP-LangKit/
