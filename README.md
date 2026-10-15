@@ -120,3 +120,7 @@ Please [open an issue](https://github.com/surelynotvain/awaria-psp/issues) with:
 ## Disclaimer
 
 This is an unofficial fan project, not affiliated with or endorsed by vanripper. All Awaria names, characters, artwork, music and related assets belong to their rights holders. The port is provided as is, without warranty.
+
+## AI disclosure
+
+AI tools are used directly in the development of **Vain's C Portable Engine** (VCPE), the PSP engine in [`engine/vcpe`](engine/vcpe/) and [`engine/vcpe2`](engine/vcpe2/). They are not used to make the demakes themselves: the Awaria PSP game is not AI-made.
