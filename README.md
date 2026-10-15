@@ -1,9 +1,3 @@
-<p align="center">
-  <img src="media/chapter1_speedrun.gif" width="480" alt="Awaria PSP: Chapter 1 played from the warning screen to REPAIR COMPLETE">
-  <br>
-  <sub>Chapter 1 from start to REPAIR COMPLETE, 2x speed (recorded from the PSP build in PPSSPP)</sub>
-</p>
-
 [![Downloads](https://img.shields.io/github/downloads/surelynotvain/awaria-psp/total)](https://github.com/surelynotvain/awaria-psp/releases/latest)
 [![Version](https://img.shields.io/github/v/release/surelynotvain/awaria-psp)](https://github.com/surelynotvain/awaria-psp/releases/latest)
 
