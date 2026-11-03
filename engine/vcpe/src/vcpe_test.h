@@ -1,6 +1,7 @@
 /* VCPE test harness: if AUTOTEST.TXT sits next to the EBOOT, the input comes from that script
  * (fixed frames, repeatable runs); "rec N" saves every Nth displayed frame to REC.RAW.
- * Built-in commands: wait N | press B | hold B N | rec N | quit. Games add their own. */
+ * Built-in commands: wait N | press B | hold B N | rec N | quit, and snap NAME when the game has none.
+ * Games add their own. */
 #ifndef VCPE_TEST_H
 #define VCPE_TEST_H
 
@@ -12,12 +13,17 @@ typedef struct {
     int (*command)(const char *cmd, const char *arg, int num, int num2, const char *line, unsigned *held);
     void (*pre)(void);                      /* every script frame first (e.g. a held stick) */
     int (*busy)(unsigned *held);            /* multi-frame actions (bot, goto): 1 = this frame is handled */
-    int every_command_takes_a_frame;        /* the Helltaker harness timing: each line ends the frame */
+    int every_command_takes_a_frame;        /* the original harness timing: each line ends the frame */
 } VcpeTestHooks;
 
 extern int vcpe_autotest;                   /* AUTOTEST.TXT was found */
 int vcpe_test_load(const VcpeTestHooks *hooks);   /* 1 if a script runs */
 void vcpe_test_step(unsigned *held);        /* the script's input for this frame */
 void vcpe_test_frame_end(void);             /* after the frame is shown: frame recording */
+/* the screen as shown now -> SNAP<name>.RAW next to the EBOOT (480x272 RGBA). Scripts get it as "snap NAME"
+ * unless the game handles "snap" itself */
+void vcpe_test_snap(const char *name);
+/* Synthetic stick position for the generic autotest command "stick X Y" (-128..127). */
+void vcpe_test_stick(int *x, int *y);
 
 #endif

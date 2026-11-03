@@ -1,4 +1,4 @@
-/* Binary scene ("world") format written by tools/awpack.py, read by w_world.c.
+/* Binary scene ("world") format written by the game's converter, read by w_world.c.
  * Little endian, every record naturally aligned, sections located by tag. */
 #ifndef AWFMT_H
 #define AWFMT_H

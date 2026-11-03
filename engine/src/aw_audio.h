@@ -15,6 +15,8 @@ void snd_remove_all(void);           /* AudioRemoveAll */
 void snd_background(int enabled);    /* backgroundSoundDisabled = !enabled */
 int snd_background_disabled(void);
 void snd_stop_all(void);
+int audio_scene(int scene);              /* 5.6: swap the sound effect set (loading window) */
+unsigned audio_scene_bytes(int scene);
 void music_play(int track);          /* SongChanger (fade out, then the new track) */
 int music_current(void);
 void music_stop_now(void);

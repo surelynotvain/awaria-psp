@@ -4,7 +4,10 @@
  * 6..    PlayShortSound instances (pausable as a group, stoppable by handle)       */
 #include <stdint.h>
 #include "aw_audio.h"
+#include <stdio.h>
 #include "awdata.h"
+#include "awsfx.h"
+#include "g_core.h"
 #include "vcpe.h"
 
 #define VOICES 26
@@ -15,10 +18,19 @@ static int next_long, next_paused, next_short;
 static volatile int bg_disabled;
 static uint32_t common_until;
 
+static void sfx_miss(int id, const char *name)
+{
+    printf("[aw] sfx miss %d %s (scene %d): not in the scene's set, read on demand\n", id, name, W.scene);
+}
+
+/* VCPE 5.6 sound residency: one fixed slab the size of the biggest chapter's set (tools/sfxsets.py) instead of every
+ * effect in RAM; audio_scene() swaps the set behind the loading screen. */
 int audio_init(const char *music_pak)
 {
-    int r = vcpe_audio_init(music_pak, VOICES, SFX_OFF, g_sfx[NUM_SFX - 1].off + g_sfx[NUM_SFX - 1].size,
-                            (const VcpeSound *)g_sfx, NUM_SFX, (const VcpeSound *)g_music);
+    int r = vcpe_audio_init(music_pak, VOICES, SFX_OFF, 0, (const VcpeSound *)g_sfx, NUM_SFX, (const VcpeSound *)g_music);
+    vcpe_sfx_miss_hook(sfx_miss);
+    if (vcpe_sfx_slab(AW_SFX_SLAB) < 0 || vcpe_sfx_keep(g_scene_sfx[0]) < 0)
+        return -1;
     vcpe_sfx_gain(179);
     vcpe_music_gain(128);
     return r;
@@ -91,6 +103,19 @@ void snd_remove_all(void)
 void snd_background(int enabled) { bg_disabled = !enabled; }
 int snd_background_disabled(void) { return bg_disabled; }
 void snd_stop_all(void) { vcpe_voices_stop_all(); }
+
+/* Chapter switch, inside the loading window. Unity destroys the PlayShortSound objects (scene-root AudioSources) when
+ * the next scene loads, so the short voices stop here; the Manager's long/paused voices survive (DontDestroyOnLoad),
+ * and an effect they are still playing stays resident. Then only the next scene's effects are kept. */
+int audio_scene(int scene)
+{
+    for (int i = SHORT0; i < VOICES; i++)
+        vcpe_voice_stop(i);
+    if (scene < 0 || scene >= AW_SFX_SETS)
+        return -1;
+    return vcpe_sfx_keep(g_scene_sfx[scene]);
+}
+unsigned audio_scene_bytes(int scene) { return scene >= 0 && scene < AW_SFX_SETS ? g_scene_sfx_bytes[scene] : 0; }
 
 void music_play(int track) { vcpe_music_play(track); }
 int music_current(void) { return vcpe_music_current(); }

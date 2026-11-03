@@ -50,6 +50,7 @@ typedef struct {
     int16_t *remap;          /* prefab instance: prefab-local GO index -> world index */
     int remap_n;
     void *self;              /* per-type state */
+    const uint8_t *pool;     /* 5.6: the field pool (FLDS) of the blob the fields came from: arrays/structs point into it */
 } Script;
 
 typedef struct {
@@ -81,6 +82,10 @@ typedef struct {
 } World;
 
 extern World W;
+/* Before loading, override a component section's instance reserve (tag = WSEC(...), 0..32767).
+ * Defaults retain 360 only for kinds actually used by prefabs. Contiguous addresses stay stable within a scene. */
+int w_component_reserve(uint32_t tag, int slots);
+extern int w_alloc_fails, w_transform_hits, w_transform_rebuilds;
 
 /* load / instance */
 int w_load(int scene);
