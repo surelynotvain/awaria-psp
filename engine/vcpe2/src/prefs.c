@@ -1,5 +1,9 @@
-/* PlayerPrefs: int / float / string values by key, saved as SETTINGS.BIN next to the EBOOT. */
-#include <pspiofilemgr.h>
+/* PlayerPrefs: int / float values by key, saved as SETTINGS.BIN next to the EBOOT.
+ *
+ * Unity's PlayerPrefs: a small key/value table loaded once and saved whole after a change. File layout: magic, count,
+ * then count fixed-size records. A file that does not check out (wrong magic, too many records, cut short) loads as
+ * "no settings", so the game starts with its defaults. 5.6: files through vcpe_plat. */
+#include "vcpe_plat.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,16 +22,16 @@ void prefs_load(const char *file)
 {
     snprintf(path, sizeof path, "%s", file);
     nprefs = 0;
-    int fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    int fd = vcpe_file_open(path);
     if (fd < 0)
         return;
     uint32_t hdr[2];
-    if (sceIoRead(fd, hdr, 8) == 8 && hdr[0] == MAGIC && hdr[1] <= MAXP) {
-        int n = sceIoRead(fd, prefs, sizeof(Pref) * hdr[1]);
+    if (vcpe_file_read(fd, hdr, 8) == 8 && hdr[0] == MAGIC && hdr[1] <= MAXP) {
+        int n = vcpe_file_read(fd, prefs, sizeof(Pref) * hdr[1]);
         if (n == (int)(sizeof(Pref) * hdr[1]))
             nprefs = hdr[1];
     }
-    sceIoClose(fd);
+    vcpe_file_close(fd);
     for (int i = 0; i < nprefs; i++)
         prefs[i].key[sizeof prefs[i].key - 1] = 0;
 }
@@ -36,16 +40,17 @@ void prefs_save(void)
 {
     if (!dirty || !path[0])
         return;
-    int fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    int fd = vcpe_file_create(path, 0);
     if (fd < 0)
         return;
     uint32_t hdr[2] = {MAGIC, (uint32_t)nprefs};
-    sceIoWrite(fd, hdr, 8);
-    sceIoWrite(fd, prefs, sizeof(Pref) * nprefs);
-    sceIoClose(fd);
-    dirty = 0;
+    uint32_t body = sizeof(Pref) * (uint32_t)nprefs;
+    int ok = vcpe_file_write(fd, hdr, 8) == 8 && vcpe_file_write(fd, prefs, body) == (int)body;
+    vcpe_file_close(fd);
+    dirty = !ok;   /* a failed write is tried again at the next save */
 }
 
+/* Find a key (linear search: there are only a few), creating it if asked. */
 static Pref *find(const char *key, int create)
 {
     for (int i = 0; i < nprefs; i++)

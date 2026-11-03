@@ -1,4 +1,4 @@
-/* GU renderer for the Awaria port: paletted swizzled pages from AW.PAK, affine sprites, glyph text. */
+/* GU renderer of the 2D runtime: paletted swizzled pages from the data PAK, affine sprites, glyph text. */
 #ifndef AW_GFX_H
 #define AW_GFX_H
 #include <stdint.h>
@@ -29,6 +29,8 @@ const char *lang_static(const char *orig);
 
 /* textures: bundle 0 is resident, scene n uses bundle 1 + n */
 int gfx_scene_textures(int scene);
+int gfx_scene_ok(void);
+extern int gfx_perf_overlay;   /* draw the engine perf overlay (vcpe_hud_perf) at the end of the frame */
 int gfx_sprite_ok(int spr);
 
 /* Draw sprite pixels (pivot-relative, y down) through screen = A*px + B*py + TX, C*px + D*py + TY.

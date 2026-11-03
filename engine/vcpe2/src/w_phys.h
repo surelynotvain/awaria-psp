@@ -2,6 +2,7 @@
  * trigger / collision enter events, OverlapCircle / Raycast / CircleCast. */
 #ifndef W_PHYS_H
 #define W_PHYS_H
+#include <stdint.h>
 
 void phys_world_init(void);
 void phys_world_free(void);
@@ -10,6 +11,11 @@ void phys_destroy(int obj);
 void phys_step(float dt);
 void phys_forget_pairs(int col);
 void phys_dirty(void);              /* invalidate the cached shape list (queries) */
+void phys_broadphase(int on);        /* default on; brute-force reference mode for engine comparisons */
+/* 5.6: the game's layer collision matrix (Physics2DSettings), rows[l] bit k = layers l and k collide (both rows must
+ * agree). 0 restores the built-in default. */
+void phys_layer_matrix(const uint32_t rows[32]);
+extern int phys_alloc_fails, phys_stat_candidates, phys_stat_grid_fallbacks;
 
 /* bodies (by object) */
 int phys_body(int go);

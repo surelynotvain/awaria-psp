@@ -6,7 +6,17 @@
 #include "w_world.h"
 #include "w_render.h"
 #include "aw_gfx.h"
+int vcpe_adapt_effect_scale(void) __attribute__((weak));
 
+/* HOW THIS FILE WORKS
+ *
+ * Unity draws 2D renderers in this order: sorting layer, then order in layer, then (here) the y position, higher y
+ * first, so things further up the screen are behind. Every frame, render_world collects one Item per visible renderer
+ * (sprite, tilemap or single tile, trail, line, canvas, particle system), sorts the list with that rule (seq keeps
+ * equal items in collection order, so the sort is stable) and draws it. Items under a SortingGroup carry the group's
+ * keys first (l1/o1/y1) and their own second (l2/o2/y2), so a group sorts as one unit.
+ *
+ * World coordinates are Unity units with y up; the screen has y down: scr_x/scr_y convert through the camera. */
 enum { IT_SR, IT_TMAP, IT_TRAIL, IT_LINE, IT_CANVAS, IT_PART, IT_TILE };
 
 typedef struct {
@@ -19,16 +29,25 @@ typedef struct {
 
 static Item *items;
 static int nitems, capitems;
+static int *order_cache, order_cap, order_count = -1;
+int render_sort_hits, render_sorts, render_culled;
 static float cam_x, cam_y, pxu, art_k;
 
 static inline float scr_x(float wx) { return SCR_W * 0.5f + (wx - cam_x) * pxu; }
 static inline float scr_y(float wy) { return SCR_H * 0.5f - (wy - cam_y) * pxu; }
 
+/* Add an item to the draw list (grown by doubling). */
 static void push(int kind, int l1, int o1, float y1, int l2, int o2, float y2, int idx)
 {
     if (nitems >= capitems) {
-        capitems = capitems ? capitems * 2 : 1024;
-        items = realloc(items, capitems * sizeof(Item));
+        int cap = capitems ? capitems * 2 : 1024;
+        Item *next = realloc(items, (size_t)cap * sizeof *items);
+        if (!next) {
+            render_alloc_fails++;
+            return;
+        }
+        items = next;
+        capitems = cap;
     }
     Item *it = &items[nitems];
     it->kind = kind; it->l1 = l1; it->o1 = o1; it->y1 = y1; it->l2 = l2; it->o2 = o2; it->y2 = y2;
@@ -36,6 +55,7 @@ static void push(int kind, int l1, int o1, float y1, int l2, int o2, float y2, i
     nitems++;
 }
 
+/* Sort rule: layer, order, higher y first, then the inner keys, then insertion order. */
 static int cmp(const void *pa, const void *pb)
 {
     const Item *a = pa, *b = pb;
@@ -48,7 +68,39 @@ static int cmp(const void *pa, const void *pb)
     return a->seq - b->seq;
 }
 
+/* Validate the previous permutation against today's complete keys. This has no hash collisions and remains
+ * correct when identities/positions change: reuse only if every adjacent item is still in exact sort order. */
+static int prepare_order(void)
+{
+    if (order_count == nitems) {
+        int valid=1;
+        for (int i=1;i<nitems;i++) if (cmp(&items[order_cache[i-1]],&items[order_cache[i]])>0) { valid=0; break; }
+        if (valid) { render_sort_hits++; return 1; }
+    }
+    if (nitems>1) qsort(items,nitems,sizeof *items,cmp);
+    render_sorts++;
+    if (nitems>order_cap) {
+        int *next=realloc(order_cache,(size_t)nitems*sizeof *next);
+        if (!next) { render_alloc_fails++; order_count=-1; return 0; }
+        order_cache=next; order_cap=nitems;
+    }
+    for (int i=0;i<nitems;i++) order_cache[i]=items[i].seq;
+    order_count=nitems;
+    return 0;
+}
+
+static int sprite_visible(int spr, float A, float B, float C, float D, float x, float y)
+{
+    const SprDef *d=&g_sprites[spr];
+    float cx=d->ox+d->w*.5f, cy=d->oy+d->h*.5f;
+    float sx=x+A*cx+B*cy, sy=y+C*cx+D*cy;
+    float hx=(fabsf(A)*d->w+fabsf(B)*d->h)*.5f+2;
+    float hy=(fabsf(C)*d->w+fabsf(D)*d->h)*.5f+2;
+    return !(sx+hx<0 || sx-hx>SCR_W || sy+hy<0 || sy-hy>SCR_H);
+}
+
 /* ------------------------------------------------------------------ sprites */
+/* Unity's Sprite Sort Point = Center: sort by the world y of the sprite's centre, not its pivot. */
 static void sprite_bounds_y(int spr, const float m[6], float *cy)
 {
     /* Sprite Sort Point = Center: world y of the sprite bounds centre */
@@ -58,6 +110,8 @@ static void sprite_bounds_y(int spr, const float m[6], float *cy)
     *cy = m[2] * lx + m[3] * ly + m[5];
 }
 
+/* Draw a SpriteRenderer through its object's world matrix (an affine sprite: rotation, scale, flips). Under a screen
+ * canvas the matrix is already in UI pixels. */
 static void draw_sr(int i)
 {
     Sr *s = &W.sr[i];
@@ -83,6 +137,7 @@ static void draw_sr(int i)
 }
 
 /* ------------------------------------------------------------------ tilemaps */
+/* Draw tiles j0..j1 of a tilemap (tile positions are relative to the tilemap object). */
 static void draw_tmap_range(int i, int j0, int j1)
 {
     const WTilemap *t = &W.tmap[i];
@@ -104,11 +159,53 @@ static void draw_tmap(int i) { draw_tmap_range(i, 0, W.tmap[i].ntile); }
 static void draw_tile(int idx) { draw_tmap_range(idx >> 16, idx & 0xFFFF, (idx & 0xFFFF) + 1); }
 
 /* ------------------------------------------------------------------ trails (position history) */
-#define TRAIL_PTS 24
+#ifndef VCPE_TRAIL_POINTS
+#define VCPE_TRAIL_POINTS 24
+#endif
+#define TRAIL_PTS VCPE_TRAIL_POINTS
+#if TRAIL_PTS < 2
+#error VCPE_TRAIL_POINTS must be at least two
+#endif
 typedef struct { float x[TRAIL_PTS], y[TRAIL_PTS], t[TRAIL_PTS]; int n; float clock; int active_prev; } TrailHist;
 static TrailHist *trails;
 static int ntrails;
+int render_alloc_fails;
 
+uint32_t render_memory_bytes(void)
+{
+    return (uint32_t)ntrails * sizeof *trails + (uint32_t)capitems * sizeof *items + (uint32_t)order_cap*sizeof *order_cache;
+}
+
+uint32_t render_trim(void)
+{
+    uint32_t before = render_memory_bytes();
+    if (W.ntrail >= 0 && W.ntrail < ntrails) {
+        TrailHist *next = W.ntrail ? realloc(trails, (size_t)W.ntrail * sizeof *trails) : 0;
+        if (!W.ntrail || next) {
+            if (!W.ntrail) free(trails);
+            trails = next; ntrails = W.ntrail;
+        }
+    }
+    int want = (nitems + 63) & ~63; /* spare room avoids shrink/grow at every tiny draw-count change */
+    if (want < capitems) {
+        Item *next = want ? realloc(items, (size_t)want * sizeof *items) : 0;
+        if (!want || next) {
+            if (!want) free(items);
+            items = next; capitems = want;
+        }
+    }
+    if (order_cap>nitems) {
+        int *next=nitems ? realloc(order_cache,(size_t)nitems*sizeof *next) : 0;
+        if (!nitems || next) {
+            if (!nitems) free(order_cache);
+            order_cache=next; order_cap=nitems;
+        }
+    }
+    return before - render_memory_bytes();
+}
+
+/* TrailRenderer: a history of positions per trail, drawn as a strip that fades from the start colour to the end
+ * colour. */
 void render_trail_clear(int go)
 {
     for (int i = 0; i < W.ntrail; i++)
@@ -118,12 +215,17 @@ void render_trail_clear(int go)
 
 static void trail_update(float dt)
 {
-    if (ntrails < W.captrail) {
-        trails = realloc(trails, sizeof(TrailHist) * W.captrail);
-        memset(trails + ntrails, 0, sizeof(TrailHist) * (W.captrail - ntrails));
-        ntrails = W.captrail;
+    if (ntrails < W.ntrail) {
+        TrailHist *next = realloc(trails, sizeof *trails * (size_t)W.ntrail);
+        if (next) {
+            trails = next;
+            memset(trails + ntrails, 0, sizeof *trails * (size_t)(W.ntrail - ntrails));
+            ntrails = W.ntrail;
+        } else {
+            render_alloc_fails++;
+        }
     }
-    for (int i = 0; i < W.ntrail; i++) {
+    for (int i = 0; i < W.ntrail && i < ntrails; i++) {
         WTrail *tr = &W.trail[i];
         TrailHist *h = &trails[i];
         if (tr->go < 0 || !obj_active(tr->go)) {
@@ -164,6 +266,8 @@ static uint32_t lerp_col(const uint8_t *c0, const uint8_t *c1, float f, float am
 
 static void draw_trail(int i)
 {
+    if (i < 0 || i >= ntrails)
+        return;
     WTrail *tr = &W.trail[i];
     TrailHist *h = &trails[i];
     if (h->n < 2)
@@ -171,7 +275,9 @@ static void draw_trail(int i)
     float xy[TRAIL_PTS * 4];
     uint32_t col[TRAIL_PTS * 2];
     int nv = 0;
+    int scale = vcpe_adapt_effect_scale ? vcpe_adapt_effect_scale() : 256;
     for (int k = h->n - 1; k >= 0; k--) {
+        if (k && k != h->n - 1 && k * scale / 256 == (k - 1) * scale / 256) continue;
         float age = (h->clock - h->t[k]) / (tr->time > 0 ? tr->time : 1);
         float w = tr->width * (1.0f - age) * 0.5f * pxu;
         int a = k > 0 ? k - 1 : k, b = k > 0 ? k : k + 1;
@@ -190,6 +296,7 @@ static void draw_trail(int i)
 }
 
 /* ------------------------------------------------------------------ lines */
+/* LineRenderer: up to 4 points drawn as thick segments. */
 static void draw_line(int i)
 {
     const WLine *l = &W.line[i];
@@ -222,6 +329,7 @@ static void draw_line(int i)
 /* ------------------------------------------------------------------ UI */
 static int ui_world;   /* drawing a world-space canvas */
 
+/* UI: canvas-space point to screen pixels through the object's matrix. */
 static void ui_to_screen(const float m[6], float x, float y, float *sx, float *sy)
 {
     float X = m[0] * x + m[1] * y + m[4], Y = m[2] * x + m[3] * y + m[5];
@@ -279,6 +387,7 @@ static int draw_image_rotated(int o, const WImg *im, uint32_t col)
     return 1;
 }
 
+/* UI Image: plain, sliced or filled (radial / horizontal fill for timers and bars), tinted. */
 static void draw_image(int o)
 {
     WImg *im = &W.img[W.obj[o].img];
@@ -334,6 +443,7 @@ static void draw_image(int o)
         gfx_clip_reset();
 }
 
+/* TextMeshPro text: wrapped and aligned inside its rect, in the font set chosen by the converter. */
 static void draw_text(int o)
 {
     Text *t = &W.text[W.obj[o].text];
@@ -401,6 +511,8 @@ static void draw_text(int o)
 /* current UI clip (screen pixels) for nested Masks */
 static int clip_x0, clip_y0 = 0, clip_x1 = SCR_W, clip_y1 = SCR_H;
 
+/* Draw a UI subtree depth first, children after parents (UI order is hierarchy order); Masks narrow the clip
+ * rectangle for their children. */
 static void draw_ui_fast(int o, int root_canvas)
 {
     Obj *ob = &W.obj[o];
@@ -456,6 +568,7 @@ static void draw_canvas(int i)
 }
 
 /* ------------------------------------------------------------------ frame */
+/* One frame: camera, collect items, sort, draw. */
 void render_world(float dt)
 {
     Obj *cam = W.camera >= 0 ? &W.obj[W.camera] : 0;
@@ -474,6 +587,10 @@ void render_world(float dt)
         Obj *o = &W.obj[s->d.go];
         if (!o->ah || o->screen)
             continue;
+        float A=o->m[0]*art_k, B=-o->m[1]*art_k, C=-o->m[2]*art_k, D=o->m[3]*art_k;
+        if (s->d.flags & WSR_FLIPX) { A=-A; C=-C; }
+        if (s->d.flags & WSR_FLIPY) { B=-B; D=-D; }
+        if (!sprite_visible(s->d.spr,A,B,C,D,scr_x(o->m[4]),scr_y(o->m[5]))) { render_culled++; continue; }
         float y;
         sprite_bounds_y(s->d.spr, o->m, &y);
         if (s->sgroup >= 0 && W.obj[s->sgroup].sgrp >= 0 && W.sgrp[W.obj[s->sgroup].sgrp].enabled) {
@@ -492,6 +609,9 @@ void render_world(float dt)
             const float *m = W.obj[t->go].m;
             for (int j = 0; j < t->ntile; j++) {
                 const WTile *tl = &W.tile[t->tile_first + j];
+                float wx=m[0]*tl->x+m[1]*tl->y+m[4], wy=m[2]*tl->x+m[3]*tl->y+m[5];
+                if (!sprite_visible(tl->spr,(tl->flags&1)?-art_k:art_k,0,0,(tl->flags&2)?-art_k:art_k,
+                                    scr_x(wx),scr_y(wy))) { render_culled++; continue; }
                 push(IT_TILE, t->layer, t->order, m[2] * tl->x + m[3] * tl->y + m[5], 0, 0, 0, i << 16 | j);
             }
             continue;
@@ -527,9 +647,9 @@ void render_world(float dt)
         push(IT_CANVAS, c->layer, c->order, c->mode == 2 ? o->m[5] : 1e9f, 0, 0, 0, i);
     }
     render_particles_items();
-    qsort(items, nitems, sizeof(Item), cmp);
+    int cached=prepare_order();
     for (int i = 0; i < nitems; i++) {
-        Item *it = &items[i];
+        Item *it = &items[cached ? order_cache[i] : i];
         switch (it->kind) {
         case IT_SR: draw_sr(it->idx); break;
         case IT_TMAP: draw_tmap(it->idx); break;
@@ -542,6 +662,7 @@ void render_world(float dt)
     }
 }
 
+/* Particle systems add their items through this, so they sort with everything else. */
 void render_push_particles(int idx, int layer, int order, float y)
 {
     push(IT_PART, layer, order, y, 0, 0, 0, idx);

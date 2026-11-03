@@ -1,5 +1,21 @@
 #include <stdio.h>
 /* Scene blobs -> runtime arrays; transforms, activity, prefab instances, script fields. */
+/* HOW THIS FILE WORKS (the "mini Unity" world store)
+ *
+ * The 2D runtime replays games made in Unity. The converter turns each Unity scene and prefab into a binary "blob"
+ * (format in awfmt.h): a list of tagged sections (GOBJ = GameObjects, SREN = SpriteRenderers, COLL = colliders, SCRP
+ * = scripts, FLDS = script field values, ...), each an array of fixed-size records.
+ *
+ * Loading a scene reads its blob and copies every section into the World W: one array per component kind, with
+ * RESERVE free slots at the end for prefab instances created while playing. Every GameObject (Obj) holds indexes into
+ * those arrays (-1 = no such component), just as a Unity GameObject has components.
+ *
+ * Transforms are 2D affine matrices of 6 floats (x' = m0 x + m1 y + m4, y' = m2 x + m3 y + m5). An object's world
+ * matrix is its parent's world matrix times its own local one. Matrices are cached per frame (stamp) and invalidated
+ * with all descendants when an object moves.
+ *
+ * Unity's activeInHierarchy (an object counts as active only if it and all its parents are) is kept in Obj.ah and
+ * refreshed by w_hierarchy. Script fields are looked up by the CRC32 of their name. */
 #include <string.h>
 #include <stdlib.h>
 #include <malloc.h>
@@ -8,10 +24,30 @@
 #include "w_anim.h"
 #include "aw_gfx.h"
 #include "w_hooks.h"
+#include "vcpe_sys.h"
+#include "vcpe_observe.h"
 
 World W;
+/* Cached local inputs for world transforms. UI rectangles retain the original full refresh because anchors and
+ * parent layout are additional inputs. Sidecars grow with instantiated objects, not MAX_OBJS. */
+typedef struct { float local[7]; uint32_t parent_rev, rev; int16_t parent; } TransformCache;
+static TransformCache *transform_cache;
+static int transform_cap;
+static TransformCache *transform_slot(int i)
+{
+    if (i>=transform_cap) {
+        int n=i+64;
+        TransformCache *next=realloc(transform_cache,(size_t)n*sizeof *next);
+        if (!next) return 0;
+        memset(next+transform_cap,0,(size_t)(n-transform_cap)*sizeof *next);
+        transform_cache=next; transform_cap=n;
+    }
+    return &transform_cache[i];
+}
+
 
 /* ------------------------------------------------------------------ CRC32 */
+/* Names (objects, fields) are compared as CRC32 hashes, the same function the converter used. */
 static uint32_t crc_tab[256];
 uint32_t name_crc(const char *s)
 {
@@ -30,6 +66,7 @@ uint32_t name_crc(const char *s)
 }
 
 /* ------------------------------------------------------------------ strings and text files */
+/* The string pool: a count, an offset table, then the 0-terminated strings. Read once, kept. */
 static uint8_t *str_mem;
 static uint32_t str_count;
 const char *w_string(int id)
@@ -40,12 +77,15 @@ const char *w_string(int id)
     return (const char *)(str_mem + 4 + 4 * str_count + idx[id]);
 }
 
+/* Text files of the current language: one pointer per line into the language data, built once. */
 static const char **txt_idx[32];
 static int txt_n[32];
 void txt_load(void)
 {
     if (!str_mem) {
+        int st = vcpe_step_begin("Loading strings: %u KB", (unsigned)((STR_SIZE + 1023) / 1024));
         str_mem = vcpe_pak_read_alloc(STR_OFF, STR_SIZE);
+        vcpe_step_end(st, str_mem != 0);
         if (str_mem)
             str_count = *(uint32_t *)str_mem;
     }
@@ -57,6 +97,7 @@ void txt_load(void)
         if (!p)
             continue;
         txt_idx[f] = malloc(sizeof(char *) * (nlines + 1));
+        if (!txt_idx[f]) { w_alloc_fails++; vcpe_observe_fail("text lines",(nlines+1)*sizeof(char *)); continue; }
         for (uint32_t i = 0; i < nlines; i++) {
             txt_idx[f][i] = p;
             p += strlen(p) + 1;
@@ -84,12 +125,14 @@ int txt_lines(int file) { return (file >= 0 && file < 32) ? txt_n[file] : 0; }
 
 /* ------------------------------------------------------------------ blobs */
 typedef struct {
+    /* A loaded blob: its memory and where each tagged section starts. */
     uint8_t *mem;
     const WSection *sec[24];
     uint32_t tags[24];
     int nsec;
 } Blob;
 
+/* Find a section by tag: pointer to its records and their count (0 if the blob has no such section). */
 static const void *blob_sec(const Blob *b, uint32_t tag, int *count)
 {
     for (int i = 0; i < b->nsec; i++) {
@@ -104,47 +147,97 @@ static const void *blob_sec(const Blob *b, uint32_t tag, int *count)
     return 0;
 }
 
+/* Read a blob from the PAK and index its sections. A 64-byte header comes first; every section is padded to 64 bytes.
+ */
 static int blob_load(Blob *b, int index)
 {
     memset(b, 0, sizeof *b);
+    if (index<0 || index>=NUM_SCENES+NUM_PREFABS) return -1;
     const BlobDef *d = &g_worlds[index];
+    if (d->size<64) return -1;
+    int st = index < NUM_SCENES ? vcpe_step_begin("Loading scene %d world: %u KB", index, (unsigned)(d->size / 1024))
+                                : vcpe_step_begin("Loading prefab %d: %u KB", index - NUM_SCENES, (unsigned)(d->size / 1024));
     b->mem = vcpe_pak_read_alloc(d->off, d->size);
+    vcpe_step_end(st, b->mem != 0);
     if (!b->mem)
         return -1;
     const WHeader *h = (const WHeader *)b->mem;
+    if (h->magic!=WSEC('A','W','W','1') || h->nsec>24) goto bad_blob;
     uint32_t off = 64;
     for (uint32_t i = 0; i < h->nsec && i < 24; i++) {
+        if (off>d->size || sizeof(WSection)>d->size-off) goto bad_blob;
         const WSection *s = (const WSection *)(b->mem + off);
+        if (s->bytes>d->size-off-sizeof *s || s->count>INT32_MAX ||
+            (s->count && (!s->elem || s->count>s->bytes/s->elem))) goto bad_blob;
         b->sec[b->nsec] = s;
         b->tags[b->nsec] = s->tag;
         b->nsec++;
         off += sizeof(WSection) + s->bytes;
+        if (off>UINT32_MAX-63) goto bad_blob;
         off = (off + 63) & ~63u;
     }
     return 0;
+bad_blob:
+    free(b->mem); memset(b,0,sizeof *b); return -1;
 }
 
+/* The current scene's blob, and every prefab's blob (loaded once and kept: instantiating must not read the PAK). */
 static Blob scene_blob;
 static Blob prefab_blob[NUM_PREFABS];
 
 #define TAG(a, b, c, d) WSEC(a, b, c, d)
 
+/* Per-kind scene capacities stay fixed while scripts can retain raw component pointers. Kinds no prefab uses
+ * need no instance reserve. Optional per-kind budgets are chosen before loading; paged VcpeStore serves new
+ * systems needing stable-address growth rather than relocating these legacy contiguous arrays. */
+static struct { uint32_t tag; int reserve; } budgets[16];
+static int nbudgets, world_alloc_failed;
+int w_alloc_fails, w_transform_hits, w_transform_rebuilds;
+int w_component_reserve(uint32_t tag, int slots)
+{
+    if (slots < 0 || slots > 32767 || W.nobj) return -1;
+    for (int i=0;i<nbudgets;i++) if (budgets[i].tag==tag) { budgets[i].reserve=slots; return 0; }
+    if (nbudgets==16) return -1;
+    budgets[nbudgets].tag=tag; budgets[nbudgets++].reserve=slots; return 0;
+}
+static int reserve_for(uint32_t tag, int fallback)
+{
+    for (int i=0;i<nbudgets;i++) if (budgets[i].tag==tag) return budgets[i].reserve;
+    for (int p=0;p<NUM_PREFABS;p++) { int n; blob_sec(&prefab_blob[p],tag,&n); if (n) return fallback; }
+    return 0;
+}
+static void *world_alloc(size_t n, size_t elem)
+{
+    if (!n) return 0;
+    void *p = n <= SIZE_MAX/elem ? calloc(n,elem) : 0;
+    if (!p) { w_alloc_fails++; vcpe_observe_fail("world",0); world_alloc_failed=1; }
+    return p;
+}
+typedef struct { uint32_t refs; int16_t map[]; } InstanceMap;
+static void map_release(int16_t *map)
+{
+    if (map) { InstanceMap *m=(InstanceMap *)((uint8_t *)map - offsetof(InstanceMap,map)); if (!--m->refs) free(m); }
+}
+
+/* Copy a section into a new array with `reserve` extra empty records (room for instances). */
 static void *dup_sec(const Blob *b, uint32_t tag, size_t elem, int *n, int *cap, int reserve)
 {
     int cnt;
     const void *src = blob_sec(b, tag, &cnt);
-    int c = cnt + reserve;
-    void *mem = calloc(c ? c : 1, elem);
-    if (src && cnt)
+    int c = cnt + reserve_for(tag, reserve);
+    void *mem = world_alloc(c, elem);
+    if (src && cnt && mem)
         memcpy(mem, src, elem * cnt);
-    *n = cnt;
+    *n = mem ? cnt : 0;
     if (cap)
-        *cap = c;
+        *cap = mem ? c : 0;
     return mem;
 }
 
+/* Free every component array of the current scene. */
 static void free_world(void)
 {
+    free(transform_cache); transform_cache=0; transform_cap=0;
     free(W.rect); free(W.sr); free(W.img);
     for (int i = 0; i < W.ntext; i++)
         free(W.text[i].own);
@@ -152,7 +245,7 @@ static void free_world(void)
     free(W.trail); free(W.line); free(W.part); free(W.audio);
     for (int i = 0; i < W.nscript; i++) {
         free(W.script[i].self);
-        free(W.script[i].remap);
+        map_release(W.script[i].remap);
     }
     free(W.script); free(W.bind);
     if (scene_blob.mem)
@@ -163,6 +256,8 @@ static void free_world(void)
 int16_t w_first_child[MAX_OBJS];
 int16_t w_next_sib[MAX_OBJS];
 
+/* Build first-child / next-sibling lists from the parent indexes, so children can be walked without scanning every
+ * object. Going backwards keeps children in their original order. */
 void w_build_children(void)
 {
     memset(w_first_child, 0xFF, sizeof(int16_t) * (W.nobj > 0 ? W.nobj : MAX_OBJS));
@@ -177,15 +272,19 @@ void w_build_children(void)
     }
 }
 
+/* Unload the scene: scripts first (OnDestroy and the like), then the arrays. */
 void w_unload(void)
 {
+    int st = W.nobj ? vcpe_step_begin("Unloading scene %d: %d objects", W.scene, W.nobj) : -1;
     hooks_unload();
     free_world();
+    vcpe_step_end(st, 1);
     memset(&W, 0, sizeof W);
     memset(w_first_child, 0xFF, sizeof w_first_child);
     memset(w_next_sib, 0xFF, sizeof w_next_sib);
 }
 
+/* A runtime GameObject from its converted record. */
 static void obj_from(Obj *o, const WGo *g)
 {
     memset(o, 0, sizeof *o);
@@ -200,6 +299,7 @@ static void obj_from(Obj *o, const WGo *g)
     o->alive = 1;
 }
 
+/* Initial text of a TextMeshPro component, translated, with its upper/lower case style applied. */
 static void text_init(Text *t)
 {
     t->str = t->d.str == 0xFFFF ? "" : lang_static(w_string(t->d.str));
@@ -210,9 +310,12 @@ static void text_init(Text *t)
         text_set((int)(t - W.text), t->str);
 }
 
+/* Load a scene: blob, prefabs, every component array, then link the scripts (Awake/OnEnable/Start run through
+ * hooks_load). */
 int w_load(int scene)
 {
     w_unload();
+    world_alloc_failed = 0;
     txt_load();
     if (blob_load(&scene_blob, scene) < 0)
         return -1;
@@ -222,6 +325,8 @@ int w_load(int scene)
     Blob *b = &scene_blob;
     int ngo;
     const WGo *gos = blob_sec(b, TAG('G', 'O', 'B', 'J'), &ngo);
+    int st = vcpe_step_begin("Creating scene %d: %d objects", scene, ngo);
+    if (ngo<0 || ngo>MAX_OBJS || (ngo && !gos)) goto load_fail;
     W.scene = scene;
     W.nobj = ngo;
     for (int i = 0; i < ngo && i < MAX_OBJS; i++)
@@ -230,8 +335,9 @@ int w_load(int scene)
     {
         int n;
         const WSr *src = blob_sec(b, TAG('S', 'R', 'E', 'N'), &n);
-        W.capsr = n + RESERVE;
-        W.sr = calloc(W.capsr, sizeof(Sr));
+        W.capsr = n + reserve_for(TAG('S','R','E','N'), RESERVE);
+        W.sr = world_alloc(W.capsr, sizeof(Sr));
+        if (W.capsr && !W.sr) goto load_fail;
         for (int i = 0; i < n; i++)
             W.sr[i].d = src[i];
         for (int i = n; i < W.capsr; i++)
@@ -242,8 +348,9 @@ int w_load(int scene)
     {
         int n;
         const WText *src = blob_sec(b, TAG('T', 'E', 'X', 'T'), &n);
-        W.captext = n + RESERVE;
-        W.text = calloc(W.captext, sizeof(Text));
+        W.captext = n + reserve_for(TAG('T','E','X','T'), RESERVE);
+        W.text = world_alloc(W.captext, sizeof(Text));
+        if (W.captext && !W.text) goto load_fail;
         for (int i = 0; i < n; i++) {
             W.text[i].d = src[i];
             text_init(&W.text[i]);
@@ -256,8 +363,9 @@ int w_load(int scene)
     {
         int n;
         const WCol *src = blob_sec(b, TAG('C', 'O', 'L', 'L'), &n);
-        W.capcol = n + RESERVE;
-        W.col = calloc(W.capcol, sizeof(Col));
+        W.capcol = n + reserve_for(TAG('C','O','L','L'), RESERVE);
+        W.col = world_alloc(W.capcol, sizeof(Col));
+        if (W.capcol && !W.col) goto load_fail;
         for (int i = 0; i < n; i++)
             W.col[i].d = src[i];
         for (int i = n; i < W.capcol; i++)
@@ -278,16 +386,18 @@ int w_load(int scene)
         int n;
         const WScript *src = blob_sec(b, TAG('S', 'C', 'R', 'P'), &n);
         const uint8_t *fields = blob_sec(b, TAG('F', 'L', 'D', 'S'), 0);
-        W.capscript = n + RESERVE;
-        W.script = calloc(W.capscript, sizeof(Script));
+        W.capscript = n + reserve_for(TAG('S','C','R','P'), RESERVE);
+        W.script = world_alloc(W.capscript, sizeof(Script));
+        if (W.capscript && !W.script) goto load_fail;
         for (int i = 0; i < n; i++) {
             Script *s = &W.script[i];
             s->type = src[i].type;
             s->go = src[i].go;
             s->enabled = src[i].enabled;
             s->alive = 1;
-            s->fields = (const WField *)(fields + src[i].field_off);
+            s->fields = fields ? (const WField *)(fields + src[i].field_off) : 0;
             s->nfield = src[i].nfield;
+            s->pool = fields;
         }
         W.nscript = n;
     }
@@ -298,6 +408,8 @@ int w_load(int scene)
         if (n)
             W.grid = *g;
     }
+    if (world_alloc_failed) goto load_fail;
+    /* Unity's SortingGroup: sprites under one are sorted together as a unit. */
     /* sorting group of each sprite renderer: nearest ancestor (or self) with a SortingGroup */
     for (int i = 0; i < W.nsr; i++) {
         W.sr[i].sgroup = -1;
@@ -308,16 +420,26 @@ int w_load(int scene)
             }
         }
     }
+    vcpe_step_end(st, 1);
+    /* The camera: orthographic size (half the view height in world units) and pixels per world unit for the 272-pixel
+     * screen. */
     W.camera = obj_find(name_crc("Main Camera"));
     W.ortho = (scene >= 12) ? 7.0f : 6.0f;
     W.pxu = 272.0f / (2.0f * W.ortho);
     gfx_scene_textures(scene);
+    st = vcpe_step_begin("Linking %d scripts", W.nscript);
     w_hierarchy();
     hooks_load();
+    vcpe_step_end(st, 1);
     return 0;
+load_fail:
+    vcpe_step_end(st, 0);
+    free_world(); memset(&W,0,sizeof W);
+    return -1;
 }
 
 /* ------------------------------------------------------------------ prefab instances */
+/* A free object slot (a destroyed one, or the next unused one). */
 static int find_free_obj(void)
 {
     for (int i = 0; i < W.nobj; i++)
@@ -328,6 +450,8 @@ static int find_free_obj(void)
     return -1;
 }
 
+/* First free record of a component array: one past the used ones, or one whose freecond holds (its object was
+ * destroyed). Grows n when it takes a new one. GCC statement expression. */
 #define ALLOC(arr, n, cap, freecond)                       \
     ({ int _r = -1;                                        \
        for (int _i = 0; _i < (cap); _i++) {                \
@@ -336,6 +460,8 @@ static int find_free_obj(void)
        if (_r >= (n)) (n) = _r + 1;                        \
        _r; })
 
+/* Object.Instantiate: copy a prefab's objects and components into free slots, translating every prefab-local index
+ * (parents, references) through map[], place its root at (x, y), then run the new scripts. */
 int w_instantiate(int prefab, float x, float y)
 {
     if (prefab < 0 || prefab >= NUM_PREFABS || !prefab_blob[prefab].mem)
@@ -343,15 +469,15 @@ int w_instantiate(int prefab, float x, float y)
     Blob *b = &prefab_blob[prefab];
     int ngo;
     const WGo *gos = blob_sec(b, TAG('G', 'O', 'B', 'J'), &ngo);
-    int16_t *map = malloc(sizeof(int16_t) * (ngo ? ngo : 1));
-    for (int i = 0; i < ngo; i++) {
-        map[i] = find_free_obj();
-        if (map[i] < 0) {
-            free(map);
-            return -1;
-        }
-        W.obj[map[i]].alive = 1;   /* reserve */
-    }
+    if (ngo < 1 || ngo > MAX_OBJS) return -1;
+    /* Refuse an exhausted object store before reserving any slots. */
+    int free_objects=MAX_OBJS-W.nobj;
+    for (int i=0;i<W.nobj;i++) if (!W.obj[i].alive) free_objects++;
+    if (free_objects<ngo) return -1;
+    InstanceMap *instance=malloc(sizeof *instance+(size_t)ngo*sizeof(int16_t));
+    if (!instance) { w_alloc_fails++; vcpe_observe_fail("world",0); return -1; }
+    instance->refs=1;
+    int16_t *map=instance->map;
     int nrect, nsr, nimg, ntext, nanim, nrb, ncol, nsgrp, ncanvas, ntrail, nline, npart, naudio, nscript;
     const WRect *rects = blob_sec(b, TAG('R', 'E', 'C', 'T'), &nrect);
     const WSr *srs = blob_sec(b, TAG('S', 'R', 'E', 'N'), &nsr);
@@ -370,6 +496,60 @@ int w_instantiate(int prefab, float x, float y)
     const WScript *scrs = blob_sec(b, TAG('S', 'C', 'R', 'P'), &nscript);
     const uint8_t *fields = blob_sec(b, TAG('F', 'L', 'D', 'S'), 0);
     (void)nrect; (void)nimg; (void)ntext; (void)nanim; (void)nrb; (void)nsgrp; (void)ncanvas; (void)ntrail; (void)nline; (void)npart; (void)naudio;
+    /* Preflight every required slot before changing the world. Exhaustion must not create half a prefab. */
+    int nr=0,ns=0,ni=0,nt=0,nb=0,nc=0,ng=0,nv=0,ntr=0,nl=0,np=0,na=0,nsc=0,bind_need=0;
+    for (int i=0;i<ngo;i++) {
+        const WGo *g=&gos[i];
+        if (g->parent>=ngo || g->rect>=nrect || g->sr>=nsr || g->img>=nimg || g->text>=ntext ||
+            g->rb>=nrb || g->anim>=nanim || g->sgrp>=nsgrp || g->canvas>=ncanvas ||
+            g->trail>=ntrail || g->line>=nline || g->part>=npart || g->audio>=naudio ||
+            (g->ncol && (g->col_first<0 || g->col_first+g->ncol>ncol)) ||
+            (g->nscript && (g->script_first<0 || g->script_first+g->nscript>nscript))) { map_release(map); return -1; }
+        nr+=g->rect>=0; ns+=g->sr>=0; ni+=g->img>=0; nt+=g->text>=0; nb+=g->rb>=0;
+        nc+=g->ncol; ng+=g->sgrp>=0; nv+=g->canvas>=0; ntr+=g->trail>=0; nl+=g->line>=0;
+        np+=g->part>=0; na+=g->audio>=0; nsc+=g->nscript;
+        if (g->anim>=0) bind_need+=g_actrls[anims[g->anim].ctrl].npath;
+    }
+#define ROOM(arr,n,cap,freecond,need) do { int room=(cap)-(n); \
+    for (int _i=0;_i<(n);_i++) room+=(freecond); \
+    if (room<(need)) { map_release(map); return -1; } } while(0)
+    ROOM(W.rect,W.nrect,W.caprect,W.rect[_i].go==-2,nr);
+    ROOM(W.sr,W.nsr,W.capsr,W.sr[_i].d.go<0,ns);
+    ROOM(W.img,W.nimg,W.capimg,W.img[_i].go<0,ni);
+    ROOM(W.text,W.ntext,W.captext,W.text[_i].d.go<0,nt);
+    ROOM(W.rbd,W.nrb,W.caprb,W.rbd[_i].go<0,nb);
+    ROOM(W.col,W.ncol,W.capcol,W.col[_i].d.go<0,nc);
+    ROOM(W.sgrp,W.nsgrp,W.capsgrp,W.sgrp[_i].go<0,ng);
+    ROOM(W.canvas,W.ncanvas,W.capcanvas,W.canvas[_i].go<0,nv);
+    ROOM(W.trail,W.ntrail,W.captrail,W.trail[_i].go<0,ntr);
+    ROOM(W.line,W.nline,W.capline,W.line[_i].go<0,nl);
+    ROOM(W.part,W.npart,W.cappart,W.part[_i].go<0,np);
+    ROOM(W.audio,W.naudio,W.capaudio,W.audio[_i].go<0,na);
+    ROOM(W.script,W.nscript,W.capscript,!W.script[_i].alive,nsc);
+#undef ROOM
+    if (bind_need>W.capbind-W.nbind) { map_release(map); return -1; }
+    if (nc) {
+        uint8_t *busy=calloc((size_t)W.capcol,1);
+        if (!busy) { w_alloc_fails++; vcpe_observe_fail("world",0); map_release(map); return -1; }
+        for (int k=0;k<W.ncol;k++) busy[k]=W.col[k].d.go>=0;
+        for (int i=0;i<ngo;i++) if (gos[i].ncol) {
+            int run=0, found=0;
+            for (int k=0;k<W.capcol;k++) {
+                run=busy[k]?0:run+1;
+                if (run==gos[i].ncol) { memset(busy+k+1-run,1,(size_t)run); found=1; break; }
+            }
+            if (!found) { free(busy); map_release(map); return -1; }
+        }
+        free(busy);
+    }
+    for (int i = 0; i < ngo; i++) {
+        map[i] = find_free_obj();
+        if (map[i] < 0) {
+            map_release(map);
+            return -1;
+        }
+        W.obj[map[i]].alive = 1;   /* reserve */
+    }
     for (int i = 0; i < ngo; i++) {
         const WGo *g = &gos[i];
         Obj *o = &W.obj[map[i]];
@@ -402,6 +582,8 @@ int w_instantiate(int prefab, float x, float y)
             int r = ALLOC(W.rbd, W.nrb, W.caprb, W.rbd[_i].go < 0);
             if (r >= 0) { W.rbd[r] = rbs[g->rb]; W.rbd[r].go = map[i]; o->rb = r; }
         }
+        /* An object's colliders must sit next to each other in the array (col_first + k): find a free run long
+         * enough. */
         if (g->ncol) {
             int first = -1;
             /* colliders of one object must be contiguous: find a free run */
@@ -445,6 +627,7 @@ int w_instantiate(int prefab, float x, float y)
             int r = ALLOC(W.audio, W.naudio, W.capaudio, W.audio[_i].go < 0);
             if (r >= 0) { W.audio[r] = auds[g->audio]; W.audio[r].go = map[i]; o->audio = r; }
         }
+        /* Animator: its bindings (which objects each animated path controls) are remapped to the new objects. */
         if (g->anim >= 0) {
             const WAnim *a = &anims[g->anim];
             int np = g_actrls[a->ctrl].npath;
@@ -458,6 +641,8 @@ int w_instantiate(int prefab, float x, float y)
                 o->anim = hook_anim_new(map[i], a->ctrl, a->update, a->enabled, first);
             }
         }
+        /* Scripts keep the prefab-to-world index map, so their object references resolve to this instance's objects.
+         */
         if (g->nscript) {
             for (int k = 0; k < g->nscript; k++) {
                 const WScript *ws = &scrs[g->script_first + k];
@@ -470,16 +655,17 @@ int w_instantiate(int prefab, float x, float y)
                     W.nscript = r + 1;
                 Script *s = &W.script[r];
                 free(s->self);
-                free(s->remap);
+                map_release(s->remap);
                 memset(s, 0, sizeof *s);
                 s->type = ws->type;
                 s->go = map[i];
                 s->enabled = ws->enabled;
                 s->alive = 1;
-                s->fields = (const WField *)(fields + ws->field_off);
+                s->fields = fields ? (const WField *)(fields + ws->field_off) : 0;
                 s->nfield = ws->nfield;
-                s->remap = malloc(sizeof(int16_t) * ngo);
-                memcpy(s->remap, map, sizeof(int16_t) * ngo);
+                s->pool = fields;
+                s->remap = map;
+                instance->refs++;
                 s->remap_n = ngo;
                 if (k == 0)
                     o->script_first = r;
@@ -498,12 +684,14 @@ int w_instantiate(int prefab, float x, float y)
     for (int i = 0; i < ngo; i++)
         if (W.obj[map[i]].anim >= 0)
             anim_recapture(W.obj[map[i]].anim);
-    free(map);
+    map_release(map);
     w_hierarchy();
     hooks_instantiate(root);
     return root;
 }
 
+/* Object.Destroy: children first, then the object's scripts are told (OnDestroy), then every component record is
+ * marked free (go = -1). */
 static void destroy_now(int o)
 {
     Obj *ob = &W.obj[o];
@@ -532,6 +720,7 @@ static void destroy_now(int o)
 }
 
 static int destroy_pending;
+/* Destroy now, or after `delay` seconds (Object.Destroy(obj, t)). */
 void w_destroy(int o, float delay)
 {
     if (o < 0 || o >= W.nobj || !W.obj[o].alive)
@@ -545,6 +734,7 @@ void w_destroy(int o, float delay)
     w_hierarchy();
 }
 
+/* Count down delayed destroys and run the ones that are due. */
 void w_tick_destroy(float dt)
 {
     if (!destroy_pending)
@@ -568,6 +758,8 @@ void w_tick_destroy(float dt)
 }
 
 /* ------------------------------------------------------------------ hierarchy and transforms */
+/* Recompute activeInHierarchy and the "under a screen-space canvas" flag for every object. Instance parents can come
+ * after their children in the array, so repeat until nothing changes. */
 void w_hierarchy(void)
 {
     extern int g_prof_hier; g_prof_hier++;
@@ -601,6 +793,7 @@ int obj_active(int o) { return o >= 0 && o < W.nobj && W.obj[o].alive && W.obj[o
 void w_activity_changed(void);
 void w_activity_subtree(int root);
 
+/* GameObject.SetActive: only that object's subtree can change, so only it is refreshed (with OnEnable/OnDisable). */
 void obj_set_active(int o, int on)
 {
     if (o < 0 || o >= W.nobj || !W.obj[o].alive)
@@ -617,8 +810,10 @@ const void *w_anim_section(int *count)
     return blob_sec(&scene_blob, TAG('A', 'N', 'I', 'M'), count);
 }
 
+/* UI is laid out for 1080 pixels high in the original; this scales canvas units to the PSP's 272 lines. */
 #define UI_S (272.0f / 1080.0f)
 
+/* The parent's RectTransform rectangle, in its local space (origin at its pivot). */
 static void parent_rect(int p, float *x0, float *y0, float *w, float *h)
 {
     /* parent rect in the parent's local space (origin = its pivot) */
@@ -632,6 +827,9 @@ static void parent_rect(int p, float *x0, float *y0, float *w, float *h)
     *x0 = *y0 = *w = *h = 0;
 }
 
+/* Local matrix of an object. For UI objects (RectTransform) the position comes from the anchors: anchor points inside
+ * the parent's rectangle, plus the anchored offset and size delta, like Unity's layout. A rotation around x or y
+ * (used for flips) is approximated by scaling the other axis by its cosine. */
 static void calc_local(int i, float lm[6])
 {
     Obj *o = &W.obj[i];
@@ -673,6 +871,7 @@ static void calc_local(int i, float lm[6])
     lm[4] = lx; lm[5] = ly;
 }
 
+/* Product of two 2D affine matrices (out = a * b). */
 static void mul(const float a[6], const float b[6], float out[6])
 {
     float r0 = a[0] * b[0] + a[1] * b[2], r1 = a[0] * b[1] + a[1] * b[3];
@@ -681,15 +880,25 @@ static void mul(const float a[6], const float b[6], float out[6])
     out[0] = r0; out[1] = r1; out[2] = r2; out[3] = r3; out[4] = r4; out[5] = r5;
 }
 
+/* World matrix of object i, computed at most once per frame: parent first (recursively), then parent * local. */
 static void update_matrix(int i)
 {
     Obj *o = &W.obj[i];
     if (o->stamp == W.frame && o->stamp_ok)
         return;
-    float lm[6];
     if (o->parent >= 0)
         update_matrix(o->parent);
+    TransformCache *cache=transform_slot(i);
+    /* Reacquire after allocation: a child's sidecar growth can move the whole sidecar array. */
+    uint32_t parent_rev=o->parent>=0 && o->parent<transform_cap ? transform_cache[o->parent].rev : 0;
+    if (cache && cache->rev && (o->parent<0 || (o->parent<transform_cap && transform_cache[o->parent].rev)) &&
+        o->stamp_ok && o->rect<0 && !o->screen && cache->parent==o->parent &&
+        cache->parent_rev==parent_rev && !memcmp(cache->local,&o->lx,sizeof cache->local)) {
+        o->stamp=W.frame; w_transform_hits++; return;
+    }
+    float lm[6];
     calc_local(i, lm);
+    w_transform_rebuilds++;
     if (o->parent >= 0) {
         Obj *p = &W.obj[o->parent];
         if (o->screen && !p->screen) {
@@ -708,6 +917,10 @@ static void update_matrix(int i)
     }
     o->stamp = W.frame;
     o->stamp_ok = 1;
+    if (cache) {
+        memcpy(cache->local,&o->lx,sizeof cache->local); cache->parent=o->parent;
+        cache->parent_rev=parent_rev; cache->rev++;
+    }
 }
 
 void obj_matrix(int o, float m[6])
@@ -716,6 +929,7 @@ void obj_matrix(int o, float m[6])
     memcpy(m, W.obj[o].m, sizeof W.obj[o].m);
 }
 
+/* New frame for the matrix cache, then refresh every active object. */
 void w_transforms(void)
 {
     W.frame++;
@@ -724,6 +938,7 @@ void w_transforms(void)
             update_matrix(i);
 }
 
+/* An object moved: its matrix and all its descendants' must be recomputed. */
 static void invalidate(int o)
 {
     W.obj[o].stamp_ok = 0;
@@ -739,6 +954,7 @@ void obj_pos(int o, float *x, float *y)
     *y = W.obj[o].m[5];
 }
 
+/* Set a world position: convert it into the parent's local space by inverting the parent's 2x2 matrix. */
 void obj_set_pos(int o, float x, float y)
 {
     if (o < 0)
@@ -768,6 +984,7 @@ void obj_scale(int o, float sx, float sy)
     invalidate(o);
 }
 
+/* Set the world rotation: local = wanted minus the sum of the parents' rotations. */
 void obj_set_rot(int o, float deg)
 {
     if (o < 0) return;
@@ -812,6 +1029,7 @@ int obj_is_descendant(int o, int ancestor)
 }
 
 /* ------------------------------------------------------------------ components */
+/* Component setters (sprite, colour as 0xAABBGGRR). */
 void sr_set_sprite(int sr, int spr) { if (sr >= 0) W.sr[sr].d.spr = spr; }
 void sr_set_color(int sr, uint32_t c)
 {
@@ -822,6 +1040,8 @@ void sr_set_color(int sr, uint32_t c)
 /* TMP FontStyles UpperCase / LowerCase: ASCII + the Polish letters of the credits */
 /* TMP UpperCase / LowerCase styles for every script the fonts cover (Latin-1, Latin Extended-A, Greek,
    Cyrillic); 2-byte UTF-8 letters keep their length, so the string is rewritten in place */
+/* Upper/lower case of one codepoint. In these Unicode blocks the cases are a fixed distance apart, or alternate (even
+ * = upper, odd = lower). */
 static uint32_t case_cp(uint32_t c, int upper)
 {
     if (upper) {
@@ -849,6 +1069,7 @@ static uint32_t case_cp(uint32_t c, int upper)
     return c;
 }
 
+/* Apply case in place to a UTF-8 string; only 1- and 2-byte characters are changed (their length never changes). */
 static void text_case(char *p, int upper)
 {
     while (*p) {
@@ -873,6 +1094,7 @@ static void text_case(char *p, int upper)
     }
 }
 
+/* Set a text component's string: copied into memory the component owns (grown when needed). */
 void text_set(int t, const char *s)
 {
     if (t < 0 || !s)
@@ -880,11 +1102,11 @@ void text_set(int t, const char *s)
     Text *tx = &W.text[t];
     int n = strlen(s) + 1;
     if (tx->own_cap < n) {
-        free(tx->own);
-        tx->own_cap = n < 64 ? 64 : n;
-        tx->own = malloc(tx->own_cap);
-    }
-    memcpy(tx->own, s, n);
+        int cap=n<64?64:n;
+        char *next=malloc((size_t)cap);
+        if (!next) { w_alloc_fails++; vcpe_observe_fail("text",(uint32_t)cap); return; }
+        memcpy(next,s,(size_t)n); free(tx->own); tx->own=next; tx->own_cap=cap;
+    } else memmove(tx->own,s,(size_t)n);
     tx->str = tx->own;
     if (tx->d.flags & (WTXT_UPPER | WTXT_LOWER))
         text_case(tx->own, tx->d.flags & WTXT_UPPER);
@@ -897,6 +1119,8 @@ void text_set_color(int t, uint32_t c)
 }
 
 /* ------------------------------------------------------------------ script fields */
+const uint8_t *w_field_pool(const Script *s);
+/* Script fields (the values set in Unity's inspector): find one by name hash. */
 const WField *f_get(const Script *s, uint32_t name)
 {
     for (int i = 0; i < s->nfield; i++)
@@ -905,24 +1129,13 @@ const WField *f_get(const Script *s, uint32_t name)
     return 0;
 }
 
-static const uint8_t *field_base(const Script *s)
-{
-    /* the pool start: fields of every script point into the same FLDS block of their blob */
-    (void)s;
-    return 0;
-}
-
+/* First element of an array or struct field: its value is a byte offset into the field pool of the blob the script
+ * came from. */
 const WField *f_child(const Script *s, const WField *f)
 {
-    (void)field_base;
     if (!f || (f->kind != F_ARRAY && f->kind != F_STRUCT) || !f->count)
         return 0;
-    /* f->v.off is the byte offset into the blob's field pool; the script's own fields start at its
-     * field_off, so walk back from the script's first field to the pool start */
-    const uint8_t *pool = (const uint8_t *)s->fields - (s->fields[0].name == 0 ? 0 : 0);
-    extern const uint8_t *w_field_pool(const Script *s);
-    pool = w_field_pool(s);
-    return (const WField *)(pool + f->v.off);
+    return (const WField *)(w_field_pool(s) + f->v.off);
 }
 
 float f_float(const Script *s, uint32_t name, float def)
@@ -943,6 +1156,7 @@ int f_int(const Script *s, uint32_t name, int def)
     return def;
 }
 
+/* A reference to another object. In a prefab instance it is a prefab-local index, mapped to the world object. */
 int f_ref_at(const Script *s, const WField *f)
 {
     if (!f || f->kind != F_REF || f->v.i < 0)
@@ -983,13 +1197,15 @@ float f_vec(const Script *s, uint32_t name, float *y)
     return f->v.f;
 }
 
+/* Which blob's field pool a script's fields live in: remembered when the script was created (5.6); scripts made
+ * some other way are found by address, a prefab's pool if they point inside it, else the scene's. */
 const uint8_t *w_field_pool(const Script *s)
 {
-    /* scene scripts use the scene blob pool, prefab scripts their prefab's pool */
+    if (s->pool)
+        return s->pool;
     for (int p = 0; p < NUM_PREFABS; p++) {
-        const uint8_t *pool = blob_sec(&prefab_blob[p], TAG('F', 'L', 'D', 'S'), 0);
         int n;
-        blob_sec(&prefab_blob[p], TAG('F', 'L', 'D', 'S'), &n);
+        const uint8_t *pool = blob_sec(&prefab_blob[p], TAG('F', 'L', 'D', 'S'), &n);
         if (pool && (const uint8_t *)s->fields >= pool && (const uint8_t *)s->fields < pool + n * 16)
             return pool;
     }

@@ -6,6 +6,10 @@
 #include "w_world.h"
 #include "w_phys.h"
 
+/* A* search on the scene's grid (converted from the AstarPath grid graph). The grid is built once per scene: a node
+ * is walkable if no collider of the grid's layer mask overlaps a circle of the node diameter at its centre. path_find
+ * runs A*: nodes to explore sit in a binary heap ordered by f = cost so far + straight-line distance to the goal; each
+ * step takes the best node and relaxes its neighbours. The path is read back through came[] from the goal. */
 static int gw, gh;
 static float ox, oy, ns;
 static uint8_t *walk;
@@ -23,6 +27,7 @@ void path_free(void)
     gw = gh = 0;
 }
 
+/* Build the walkable grid for the scene. */
 void path_build(void)
 {
     path_free();
@@ -42,6 +47,10 @@ void path_build(void)
     came = malloc(sizeof(int16_t) * n);
     state = malloc(n);
     heap = malloc(sizeof(int) * n);
+    if (!walk || !gcost || !fcost || !came || !state || !heap) {   /* no grid: path_find finds nothing */
+        path_free();
+        return;
+    }
     float r = g->diameter * 0.5f;
     for (int j = 0; j < gh; j++)
         for (int i = 0; i < gw; i++) {
@@ -50,11 +59,14 @@ void path_build(void)
         }
 }
 
+/* Grid node of a world position, clamped to the grid; if that node is blocked, the nearest walkable one. */
 static int node_at(float x, float y)
 {
     int i = (int)floorf((x - ox) / ns), j = (int)floorf((y - oy) / ns);
-    if (i < 0) i = 0; if (i >= gw) i = gw - 1;
-    if (j < 0) j = 0; if (j >= gh) j = gh - 1;
+    if (i < 0) i = 0;
+    if (i >= gw) i = gw - 1;
+    if (j < 0) j = 0;
+    if (j >= gh) j = gh - 1;
     int best = j * gw + i;
     if (walk[best])
         return best;
@@ -70,6 +82,7 @@ static int node_at(float x, float y)
     return best;
 }
 
+/* Binary heap push / pop on f cost (the smallest on top). */
 static void hpush(int n)
 {
     int i = heapn++;
@@ -98,6 +111,7 @@ static int hpop(void)
     return top;
 }
 
+/* A* from (sx, sy) to (tx, ty); writes the cell centres into out and returns their count. */
 int path_find(float sx, float sy, float tx, float ty, float *out, int max)
 {
     if (!gw)
@@ -146,21 +160,17 @@ int path_find(float sx, float sy, float tx, float ty, float *out, int max)
     }
     if (!found)
         return 0;
-    /* walk back, then reverse into out (node centres) */
-    int cnt = 0;
+    /* The path runs back from the goal through came[]: count it, then write the first `max` nodes from the start
+     * into out (5.6: any length; before, paths over 256 nodes overran a fixed 256-node buffer). */
+    int len = 0;
     for (int c = t; c >= 0; c = came[c])
-        cnt++;
-    if (cnt > max) cnt = max;
-    int k = cnt - 1;
-    int idx = 0;
-    int nodes[256];
-    for (int c = t; c >= 0 && idx < 256; c = came[c])
-        nodes[idx++] = c;
-    for (int i = 0; i < cnt; i++) {
-        int c = nodes[idx - 1 - i];
-        out[i * 2] = ox + (c % gw + 0.5f) * ns;
-        out[i * 2 + 1] = oy + (c / gw + 0.5f) * ns;
-    }
-    (void)k;
+        len++;
+    int cnt = len < max ? len : max;
+    int pos = len - 1;
+    for (int c = t; c >= 0; c = came[c], pos--)
+        if (pos < cnt) {
+            out[pos * 2] = ox + (c % gw + 0.5f) * ns;
+            out[pos * 2 + 1] = oy + (c / gw + 0.5f) * ns;
+        }
     return cnt;
 }

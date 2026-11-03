@@ -8,6 +8,8 @@ An unofficial fan-made demake of **Awaria** by **vanripper** for the **PlayStati
 > [!NOTE]
 > **Honest note:** this port is quite a rushed asset swap and simple logic swap from my [Helltaker PSP demake](https://github.com/surelynotvain/helltaker-psp). It runs on the same engine (now called **Vain's C Portable Engine**), with Awaria's art, sound, text and game logic swapped in. Expect some rough edges, and please report them.
 
+Since **1.20** the game runs on **VCPE 5.6**: the standard VCPE loading screens, PSP-1000 support and less memory use (see the [release notes](https://github.com/surelynotvain/awaria-psp/releases/latest)).
+
 ## Download
 
 Get the latest version from the [Releases page](https://github.com/surelynotvain/awaria-psp/releases/latest):
@@ -42,8 +44,11 @@ You need a PSP with custom firmware (for example ARK-4). Your save (`SETTINGS.BI
 |---|---|
 | D-pad / analog stick | Move |
 | Cross | Interact, confirm |
-| Square / R | Dash |
+| Square / R (also Circle / L) | Dash, from Chapter 10 on |
 | Start | Pause |
+| Select (hold) | Performance overlay (FPS, update and draw times, free memory) |
+
+**Dash unlocks in Chapter 10**, as in the PC game: that chapter starts with a short dash tutorial. Before that, the dash button does not dash. If you press it while standing still, Ula eats a cupcake (an Easter egg from the original).
 
 ## Compatibility
 
@@ -51,10 +56,10 @@ You need a PSP with custom firmware (for example ARK-4). Your save (`SETTINGS.BI
 |---|---|
 | PSP-2000 / 3000 / Street | Supported (playtested on a PSP-3000) |
 | PSP Go | Supported |
-| PSP-1000 | **Not supported yet.** The final chapter needs more memory than the PSP-1000 has. A later update will make it fit |
+| PSP-1000 | **Experimental since 1.20.** All chapters fit in its 32 MB in emulator testing, but it has not been tried on a real PSP-1000 yet: please report how it goes |
 | PPSSPP | Works |
 
-**PSP-1000 owners:** the [demo](https://github.com/surelynotvain/awaria-psp/releases/tag/v0.2-demo) should run on your model. Please try it and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to say how it went.
+**PSP-1000 owners:** please try 1.20 and [open an issue](https://github.com/surelynotvain/awaria-psp/issues) to say how it went (the chapter you reached and, if it stops, a photo of the message). Turning plugins off leaves the game more memory.
 
 ## Troubleshooting
 
@@ -101,7 +106,7 @@ The XMB entry has its own artwork, an animated icon (a Chapter 1 run) and backgr
 
 ## Source code
 
-The engine source is in [engine/](engine/): **Vain's C Portable Engine 2**, the base shared with Helltaker PSP plus a small Unity-style runtime (scenes, animator, physics, pathfinding), and the Awaria game code on top of it. Game assets, converted game data and the converter are not included.
+The engine source is in [engine/](engine/): the **Vain's C Portable Engine 5.6** modules Awaria uses, its Unity-style runtime (scenes, animator, physics, pathfinding), and the Awaria game code on top of it. Game assets, converted game data and the converter are not included.
 
 ## Reporting bugs
 

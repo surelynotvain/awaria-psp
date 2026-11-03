@@ -34,24 +34,29 @@ void g_quit(void) { vcpe_running = 0; }
  * If AUTOTEST.TXT sits next to the EBOOT, inputs come from it:
  *   scene N | wait N | press B | hold B N | stick X Y N (analog, -100..100) | quit
  *   B: up down left right ok dash back start                                         */
-static int dump_req;
+static int dump_req, load_snap;
 static float goto_x, goto_y; static int goto_frames, bot_frames;
 void bot_step(float *mx, float *my, int *press);
 static float stick_x, stick_y;
 static int stick_frames;
 int g_autotest;
 
+/* the PSP buttons behind each game button (README controls; SELECT is the perf overlay). The stick is read as
+ * analog movement in read_input, not as d-pad bits */
+static const VcpePadBind binds[] = {
+    {PSP_CTRL_UP, BTN_UP}, {PSP_CTRL_DOWN, BTN_DOWN}, {PSP_CTRL_LEFT, BTN_LEFT}, {PSP_CTRL_RIGHT, BTN_RIGHT},
+    {PSP_CTRL_CROSS, BTN_PRIMARY},
+    {PSP_CTRL_SQUARE | PSP_CTRL_CIRCLE | PSP_CTRL_RTRIGGER | PSP_CTRL_LTRIGGER, BTN_SECONDARY},
+    {PSP_CTRL_START, BTN_CANCEL}};
+
+/* script names: the engine's (vcpe_pad_button) plus Awaria's "dash" */
 static unsigned btn_from(const char *s)
 {
-    if (!strcmp(s, "up")) return BTN_UP;
-    if (!strcmp(s, "down")) return BTN_DOWN;
-    if (!strcmp(s, "left")) return BTN_LEFT;
-    if (!strcmp(s, "right")) return BTN_RIGHT;
-    if (!strcmp(s, "ok")) return BTN_PRIMARY;
-    if (!strcmp(s, "dash")) return BTN_SECONDARY;
-    if (!strcmp(s, "back")) return BTN_SECONDARY;
-    if (!strcmp(s, "start")) return BTN_CANCEL;
-    return 0;
+    if (!strcmp(s, "dash"))
+        return PSP_CTRL_SQUARE;
+    if (!strcmp(s, "back"))
+        return PSP_CTRL_SQUARE;
+    return vcpe_pad_button(s);
 }
 
 static int k_last_far(const float *wp, int n, float x, float y);
@@ -73,7 +78,7 @@ static int test_busy(unsigned *held)
         bot_frames--;
         int press;
         bot_step(&IN.mx, &IN.my, &press);
-        if (press) *held = BTN_PRIMARY;
+        if (press) *held = PSP_CTRL_CROSS;
         if (bot_frames % 600 == 0) {
             Script *pl = find_script(ST_PlayerScript);
             if (pl) { float x, y; obj_pos(pl->go, &x, &y); printf("[aw] bot %d player %.2f,%.2f hand %d %d scene %d\n", bot_frames, x, y, player_hand(pl, 0), player_hand(pl, 1), W.scene); }
@@ -122,6 +127,8 @@ static int test_command(const char *cmd, const char *arg, int num, int num2, con
         stick_frames = num2;
         return VCPE_CMD_FRAME;
     }
+    if (!strcmp(cmd, "loadshow")) { vcpe_loading_show_after(atoi(arg)); return VCPE_CMD_NEXT; }   /* emulator loads are fast */
+    if (!strcmp(cmd, "loadsnap")) { load_snap = 1; return VCPE_CMD_NEXT; }   /* SNAPLOAD.RAW: the next loading screen's last frame */
     if (!strcmp(cmd, "pref")) { prefs_set_int(arg, num); return VCPE_CMD_NEXT; }
     return VCPE_CMD_UNKNOWN;
 }
@@ -168,39 +175,27 @@ static int k_last_far(const float *wp, int n, float x, float y)
 
 static void read_input(void)
 {
-    static unsigned prev;
-    unsigned held = 0;
-    IN.mx = IN.my = 0;
-    if (vcpe_autotest) {
-        vcpe_test_step(&held);
-    } else {
-        SceCtrlData pad;
-        sceCtrlPeekBufferPositive(&pad, 1);
-        unsigned b = pad.Buttons;
-        float ax = (pad.Lx - 128) / 127.0f, ay = (128 - pad.Ly) / 127.0f;
+    IN.mx = IN.my = 0;            /* autotest "stick" / bot set these during vcpe_pad_update */
+    unsigned held = vcpe_pad_update();
+    if (!vcpe_autotest) {
+        int sx, sy;
+        vcpe_pad_stick(&sx, &sy);
+        float ax = sx / 127.0f, ay = -sy / 127.0f;
         if (fabsf(ax) < 0.25f) ax = 0;
         if (fabsf(ay) < 0.25f) ay = 0;
         IN.mx = ax; IN.my = ay;
-        if (b & PSP_CTRL_UP) held |= BTN_UP;
-        if (b & PSP_CTRL_DOWN) held |= BTN_DOWN;
-        if (b & PSP_CTRL_LEFT) held |= BTN_LEFT;
-        if (b & PSP_CTRL_RIGHT) held |= BTN_RIGHT;
-        if (b & PSP_CTRL_CROSS) held |= BTN_PRIMARY;
-        if (b & (PSP_CTRL_SQUARE | PSP_CTRL_CIRCLE | PSP_CTRL_RTRIGGER | PSP_CTRL_LTRIGGER)) held |= BTN_SECONDARY;
-        if (b & (PSP_CTRL_START | PSP_CTRL_SELECT)) held |= BTN_CANCEL;
     }
     /* the D-pad adds to the stick (InputSystem composite) */
     if (held & BTN_LEFT) IN.mx = -1;
     if (held & BTN_RIGHT) IN.mx = 1;
     if (held & BTN_UP) IN.my = 1;
     if (held & BTN_DOWN) IN.my = -1;
-    unsigned edges = held & ~prev;
+    unsigned edges = vcpe_pad_pressed();
     IN.held = held;
     IN.pressed = edges;
     IN.primary = (edges & BTN_PRIMARY) != 0;
     IN.secondary = (edges & BTN_SECONDARY) != 0;
     IN.cancel = (edges & BTN_CANCEL) != 0;
-    prev = held;
 }
 
 #if AW_DEMO_DATA
@@ -213,8 +208,16 @@ static int demo_scene(int scene) { return scene > 2 ? 0 : scene; }
 #if AW_DEMO_DATA
 #define AW_VERSION "0.21 demo"   /* keep in step with tools/mksfo.py */
 #else
-#define AW_VERSION "1.01"
+#define AW_VERSION "1.20"
 #endif
+
+/* what a scene switch reads from AW.PAK: its texture bundle and its world */
+static uint32_t scene_bytes(int scene)
+{
+    if (scene < 0 || scene >= NUM_SCENES)
+        return 0;
+    return (1 + scene < NUM_BUNDLES ? g_bundles[1 + scene].size : 0) + g_worlds[scene].size;
+}
 
 static void start_fail(const char *what)
 {
@@ -233,6 +236,7 @@ static void start_fail(const char *what)
 static void check_pak(const char *path)
 {
     char why[200];
+    int st = vcpe_step_begin("Checking AW.PAK: %u KB", (unsigned)((STR_OFF + STR_SIZE) / 1024));
     SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
     if (fd < 0)
         start_fail("AW.PAK was not found next to EBOOT.PBP.");
@@ -251,16 +255,23 @@ static void check_pak(const char *path)
                  "%u). The files come from different versions or downloads.", size, (unsigned)want);
         start_fail(why);
     }
+    vcpe_step_end(st, 1);
 }
 
 int main(int argc, char *argv[])
 {
     vcpe_sys_init(argc, argv);
+    int small = vcpe_mem_32mb();   /* measure the heap before anything is allocated */
     char p[300];
     vcpe_path(p, sizeof p, "SETTINGS.BIN");
     prefs_load(p);
     gfx_init();
+    vcpe_gfx_pipeline(1);   /* VCPE 3.1: the GE draws a frame while the next one updates */
+    vcpe_gfx_batch(1);
     vcpe_path(p, sizeof p, "AW.PAK");
+    /* boot: the common pages, the text and all sound effects (VCPE 5.6 startup animation) */
+    vcpe_loading_boot_anim(1);
+    vcpe_loading_begin(g_bundles[0].size + LANG_SIZE + audio_scene_bytes(0));
     check_pak(p);
     if (gfx_pak_open(p) < 0) {
         snprintf(p, sizeof p, "Could not read the graphics from AW.PAK (free memory: %d KB). The memory "
@@ -272,18 +283,25 @@ int main(int argc, char *argv[])
     if (gfx_lang_load(p, prefs_int("lang", 1)) < 0)
         start_fail("The text inside AW.PAK could not be read: the file is damaged or from a different version.");
     printf("[aw] language %s\n", lang_name());
+    {
+        uint32_t vs;
+        printf("[aw] memory %s, volatile %s, heap free %d KB\n", small ? "32 MB (PSP-1000)" : "64 MB",
+               small && vcpe_volatile_mem(&vs) ? "used" : "unused", vcpe_heap_kb());
+    }
     vcpe_path(p, sizeof p, "MUSIC.PAK");
     SceUID mfd = sceIoOpen(p, PSP_O_RDONLY, 0);
     if (mfd < 0)
         start_fail("MUSIC.PAK was not found next to EBOOT.PBP.");
     sceIoClose(mfd);
     audio_init(p);
+    vcpe_loading_end();
+    vcpe_loading_boot_anim(0);
+    vcpe_loading_show_after(0);   /* chapter switches always show the in-game loading screen */
     music_set_volume10(10.0f);
     sfx_set_volume10(10.0f);
     prefs_set_float("musicVolume", 10.0f);
     prefs_set_float("sfxVolume", 10.0f);
-    sceCtrlSetSamplingCycle(0);
-    sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+    vcpe_pad_init(binds, sizeof binds / sizeof binds[0], VCPE_STICK_NONE);
     script_load();
     srand(g_autotest ? 12345u : sceKernelGetSystemTimeLow());   /* test runs are repeatable */
 #if AW_DEMO_DATA
@@ -291,17 +309,47 @@ int main(int argc, char *argv[])
 #endif
     g_scene_request(0);
     SceInt64 last = sceKernelGetSystemTimeWide();
+    int trim_after = 0;
     while (vcpe_running) {
-        if (g_scene_pending() >= 0)
+        if (g_scene_pending() >= 0) {
+            /* VCPE loading screen while the old chapter goes out and the next one comes in */
+            vcpe_loading_begin(scene_bytes(g_scene_pending()) + audio_scene_bytes(g_scene_pending()));
+            if (audio_scene(g_scene_pending()) < 0)
+                printf("[aw] sfx set for scene %d did not fit\n", g_scene_pending());
             g_scene_switch();
+            vcpe_loading_end();
+            trim_after = 2;   /* 5.6: trim the draw list / trails to this chapter's need once it has drawn */
+            if (g_autotest) {
+                char mr[200];
+                vcpe_mem_report(mr, sizeof mr, "switch");
+                printf("[aw] scene %d loaded, loading screen frames %d\n[aw] %s, sfx %u KB in a %u KB slab\n", W.scene,
+                       vcpe_loading_shown(), mr, (unsigned)vcpe_sfx_resident_kb(), (unsigned)vcpe_sfx_slab_kb());
+            }
+            if (load_snap && vcpe_loading_shown()) {
+                load_snap = 0;
+                vcpe_test_snap("LOAD");
+            }
+            if (!gfx_scene_ok()) {
+                snprintf(p, sizeof p, "The pictures of chapter %d could not be loaded (free memory: %d KB). The "
+                         "memory stick may have read errors, or a plugin may be using memory: try again with "
+                         "plugins off.", W.scene, vcpe_heap_kb());
+                start_fail(p);
+            }
+        }
         read_input();
+        /* hold SELECT: FPS, update and draw times, free memory (the numbers to report from real hardware) */
+        gfx_perf_overlay = (vcpe_pad_psp() & PSP_CTRL_SELECT) != 0;
         SceInt64 now = sceKernelGetSystemTimeWide();
         float udt = (now - last) / 1000000.0f;
         last = now;
         if (g_autotest || udt <= 0 || udt > 0.1f)
             udt = 1.0f / 60.0f;
         SceInt64 p0 = sceKernelGetSystemTimeWide();
+        if (gfx_perf_overlay)
+            vcpe_perf_update_begin();
         g_update(udt);
+        if (gfx_perf_overlay)
+            vcpe_perf_update_end();
         SceInt64 p1 = sceKernelGetSystemTimeWide();
         if (g_autotest) {
             static int fr;
@@ -312,15 +360,19 @@ int main(int argc, char *argv[])
                 printf("[aw] f%d scene %d scale %.2f objs %d active %d cam %.2f,%.2f\n", fr, W.scene, T.scale, W.nobj, act, W.cam_x, W.cam_y);
                 /* memory audit (PSP-1000: 24 MB user RAM): heap high-water mark (sbrk arena) and live bytes */
                 struct mallinfo mi = mallinfo();
-                static int peak_used;
-                if ((int)mi.uordblks > peak_used) peak_used = mi.uordblks;
-                printf("[aw] mem scene %d arena %d KB used %d KB peak %d KB kfree %d KB\n", W.scene, mi.arena / 1024,
-                       mi.uordblks / 1024, peak_used / 1024, (int)(sceKernelTotalFreeMemSize() / 1024));
+                printf("[aw] mem scene %d arena %d KB used %d KB peak %d KB free %d KB scene-tex %s sfx %u/%u KB misses %d\n",
+                       W.scene, mi.arena / 1024, vcpe_mem_used_kb(), vcpe_mem_peak_kb(), vcpe_heap_kb(),
+                       gfx_scene_ok() ? "ok" : "MISSING", (unsigned)vcpe_sfx_resident_kb(), (unsigned)vcpe_sfx_slab_kb(),
+                       vcpe_sfx_misses());
             }
         }
         w_transforms();
         gfx_begin(RGBA(0, 0, 0, 255));
         render_world(T.dt);
+        if (trim_after && !--trim_after) {
+            uint32_t kb = render_trim() / 1024;
+            if (g_autotest) printf("[aw] scene %d render trim: %u KB released\n", W.scene, (unsigned)kb);
+        }
         SceInt64 p2 = sceKernelGetSystemTimeWide();
         gfx_end();
         vcpe_test_frame_end();

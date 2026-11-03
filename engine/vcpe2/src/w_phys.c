@@ -1,4 +1,3 @@
-#include <pspkernel.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,20 +5,60 @@
 #include "w_phys.h"
 #include "w_world.h"
 #include "g_core.h"
+#include "vcpe_spatial.h"
+#include "vcpe_observe.h"
+#include "vcpe_plat.h"
 
-/* Physics2DSettings.m_LayerCollisionMatrix (rows that are not "everything") */
-static uint32_t layer_matrix(int l)
+/* HOW THIS FILE WORKS (a subset of Unity's Physics2D)
+ *
+ * Rigidbody2D: dynamic bodies integrate forces and gravity (9.81 * gravityScale) into velocity, with linear and
+ * angular drag; kinematic bodies only move by their velocity; static ones never move. Colliders (circle, box,
+ * capsule) belong to the nearest ancestor with a rigidbody. Each fixed step:
+ * 1. integrate velocities and move the bodies;
+ * 2. gather every enabled collider in world space (the list is reused until something changes: phys_dirty);
+ * 3. find overlapping pairs whose layers may collide; push dynamic bodies out of solid shapes (and of the static wall
+ *    boxes from tilemap colliders);
+ * 4. compare this step's pairs with the last step's (both sorted): new pairs are "enter" events, delivered to scripts
+ *    as OnTriggerEnter2D / OnCollisionEnter2D. Queries (OverlapCircle, Raycast, CircleCast) test the same gathered
+ *    shapes. */
+/* Physics2DSettings.m_LayerCollisionMatrix: row l has bit k set when layer l collides with layer k. The game sets its
+ * own with phys_layer_matrix; until then the rows of the first game on this runtime apply (layers 6, 7, 9 and 10:
+ * player/enemy collision, death, player hitbox), so existing builds behave as before. Two layers collide when both
+ * rows say so; collide[] keeps that answer as one bit per pair. */
+static const uint32_t default_rows[32] = {
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+    0xfffffd7fu,   /* 6 PlayerCollision: not EnemyCollision, not Death */
+    0xfffffb3fu,   /* 7 EnemyCollision: not PlayerCollision, EnemyCollision, PlayerHitbox */
+    0xffffffffu,
+    0xffffffbfu,   /* 9 Death: not PlayerCollision */
+    0xffffff7fu,   /* 10 PlayerHitbox: not EnemyCollision */
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+static uint32_t collide[32];
+static int collide_ready;
+
+void phys_layer_matrix(const uint32_t rows[32])
 {
-    switch (l) {
-    case 6: return 0xfffffd7fu;   /* PlayerCollision: not EnemyCollision, not Death */
-    case 7: return 0xfffffb3fu;   /* EnemyCollision: not PlayerCollision, EnemyCollision, PlayerHitbox */
-    case 9: return 0xffffffbfu;   /* Death: not PlayerCollision */
-    case 10: return 0xffffff7fu;  /* PlayerHitbox: not EnemyCollision */
+    if (!rows)
+        rows = default_rows;
+    for (int a = 0; a < 32; a++) {
+        collide[a] = 0;
+        for (int b = 0; b < 32; b++)
+            if ((rows[a] >> b) & (rows[b] >> a) & 1)
+                collide[a] |= 1u << b;
     }
-    return 0xffffffffu;
+    collide_ready = 1;
 }
-static int layers_collide(int a, int b) { return (layer_matrix(a) >> b) & 1 && (layer_matrix(b) >> a) & 1; }
 
+static int layers_collide(int a, int b)
+{
+    if (!collide_ready)
+        phys_layer_matrix(0);
+    return (collide[a & 31] >> (b & 31)) & 1;
+}
+
+/* Per-rigidbody motion state: velocity, accumulated force, angular velocity. */
 typedef struct { float vx, vy, fx, fy, av; } Body;
 static Body *bodies;
 static int nbodies;
@@ -30,18 +69,34 @@ static int ncolb;
 static int gather_valid = -1;
 void phys_dirty(void) { gather_valid = -1; }
 
+/* A gathered collider in world space: centre, radius or half extents, and what it belongs to. */
 typedef struct { int col; int go; int body; uint8_t kind, trigger, layer, pad; float x, y, r, hx, hy; } CG;
 static CG *cg;
 static int ncg, capcg;
 
+/* Overlapping pairs as sorted 32-bit keys (two collider indexes), this step and the previous one. */
 static uint32_t *pairs_prev, *pairs_cur;
 static int nprev, ncur, cappairs;
+int phys_alloc_fails, phys_stat_candidates, phys_stat_grid_fallbacks;
+static int grid_enabled=1;
+static VcpeGrid spatial;
+void phys_broadphase(int on) { grid_enabled=on!=0; }
+static int reserve_bodies(void)
+{
+    if (W.nrb<=nbodies) return 1;
+    Body *next=realloc(bodies,(size_t)W.nrb*sizeof *next);
+    if (!next) { phys_alloc_fails++; vcpe_observe_fail("physics",0); return 0; }
+    memset(next+nbodies,0,(size_t)(W.nrb-nbodies)*sizeof *next); bodies=next; nbodies=W.nrb; return 1;
+}
 
+
+/* Map each collider to its rigidbody: the nearest ancestor (or self) that has one. */
 static void attach_colliders(void)
 {
-    if (ncolb < W.capcol) {
-        col_body = realloc(col_body, sizeof(int16_t) * W.capcol);
-        ncolb = W.capcol;
+    if (ncolb < W.ncol) {
+        int16_t *next=realloc(col_body,sizeof *next*(size_t)W.ncol);
+        if (!next) { phys_alloc_fails++; vcpe_observe_fail("physics",0); return; }
+        col_body=next; ncolb=W.ncol;
     }
     for (int c = 0; c < W.ncol; c++) {
         col_body[c] = -1;
@@ -60,8 +115,7 @@ void phys_world_init(void)
 {
     gather_valid = -1;
     phys_world_free();
-    nbodies = W.caprb;
-    bodies = calloc(nbodies ? nbodies : 1, sizeof(Body));
+    reserve_bodies();
     attach_colliders();
 }
 
@@ -70,19 +124,16 @@ void phys_world_free(void)
     free(bodies); bodies = 0; nbodies = 0;
     free(col_body); col_body = 0; ncolb = 0;
     nprev = ncur = 0;
+    vcpe_grid_free(&spatial);
 }
 
 void phys_instantiate(int root)
 {
     gather_valid = -1;
     (void)root;
-    if (nbodies < W.caprb) {
-        bodies = realloc(bodies, sizeof(Body) * W.caprb);
-        memset(bodies + nbodies, 0, sizeof(Body) * (W.caprb - nbodies));
-        nbodies = W.caprb;
-    }
+    reserve_bodies();
     for (int o = 0; o < W.nobj; o++)
-        if (W.obj[o].alive && W.obj[o].rb >= 0 && obj_is_descendant(o, root))
+        if (W.obj[o].alive && W.obj[o].rb >= 0 && W.obj[o].rb<nbodies && obj_is_descendant(o, root))
             memset(&bodies[W.obj[o].rb], 0, sizeof(Body));
     attach_colliders();
 }
@@ -90,22 +141,28 @@ void phys_instantiate(int root)
 void phys_destroy(int obj)
 {
     gather_valid = -1;
-    if (W.obj[obj].rb >= 0)
+    if (W.obj[obj].rb >= 0 && W.obj[obj].rb<nbodies)
         memset(&bodies[W.obj[obj].rb], 0, sizeof(Body));
 }
 
 /* ------------------------------------------------------------------ geometry */
 
+/* Collect every enabled collider of an active object in world space. */
 static void gather(int include_triggers)
 {
     if (gather_valid == include_triggers)
         return;
-    gather_valid = include_triggers;
+    ncg=0;
+    if (ncolb<W.ncol) attach_colliders();
+    if (ncolb<W.ncol) return;
     int need = W.ncol + W.nwall;
     if (capcg < need) {
-        capcg = need + 64;
-        cg = realloc(cg, sizeof(CG) * capcg);
+        int cap=need+64;
+        CG *next=realloc(cg,sizeof *next*(size_t)cap);
+        if (!next) { phys_alloc_fails++; vcpe_observe_fail("physics",0); return; }
+        cg=next; capcg=cap;
     }
+    gather_valid=include_triggers;
     ncg = 0;
     for (int c = 0; c < W.ncol; c++) {
         Col *co = &W.col[c];
@@ -145,6 +202,7 @@ static void gather(int include_triggers)
 }
 
 /* separation of shape a from b: returns 1 and the push (on a) when they overlap */
+/* Do two shapes overlap? If so, the shortest push (px, py) that separates them. */
 static int sep(const CG *a, const CG *b, float *px, float *py)
 {
     int ac = a->kind == COL_CIRCLE, bc = b->kind == COL_CIRCLE;
@@ -199,15 +257,19 @@ static int pair_cmp(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-static void pair_add(int a, int b)
+static int pair_add(int a, int b)
 {
     if (ncur >= cappairs) {
-        cappairs = cappairs ? cappairs * 2 : 512;
-        pairs_cur = realloc(pairs_cur, sizeof(uint32_t) * cappairs);
-        pairs_prev = realloc(pairs_prev, sizeof(uint32_t) * cappairs);
+        int cap=cappairs ? cappairs*2 : 512;
+        uint32_t *cur=malloc(sizeof *cur*(size_t)cap), *prev=malloc(sizeof *prev*(size_t)cap);
+        if (!cur || !prev) { free(cur); free(prev); phys_alloc_fails++; vcpe_observe_fail("physics",0); return 0; }
+        if (ncur) memcpy(cur,pairs_cur,(size_t)ncur*sizeof *cur);
+        if (nprev) memcpy(prev,pairs_prev,(size_t)nprev*sizeof *prev);
+        free(pairs_cur); free(pairs_prev); pairs_cur=cur; pairs_prev=prev; cappairs=cap;
     }
     uint32_t ka = (uint32_t)(a + 32768) & 0xFFFF, kb = (uint32_t)(b + 32768) & 0xFFFF;
     pairs_cur[ncur++] = ka < kb ? (ka << 16 | kb) : (kb << 16 | ka);
+    return 1;
 }
 
 static int pair_was(uint32_t key)
@@ -217,13 +279,16 @@ static int pair_was(uint32_t key)
 
 static int dynamic_body(int b)
 {
-    return b >= 0 && W.rbd[b].go >= 0 && W.rbd[b].type == RB_DYNAMIC && W.rbd[b].sim && obj_active(W.rbd[b].go);
+    return b >= 0 && b<nbodies && W.rbd[b].go >= 0 && W.rbd[b].type == RB_DYNAMIC && W.rbd[b].sim && obj_active(W.rbd[b].go);
 }
 
+/* One fixed physics step (see the top of the file). */
 void phys_step(float dt)
 {
+    uint32_t observed=vcpe_observe_begin();
+    reserve_bodies();
     /* integrate */
-    for (int b = 0; b < W.nrb; b++) {
+    for (int b = 0; b < W.nrb && b<nbodies; b++) {
         WRb *rb = &W.rbd[b];
         if (rb->go < 0 || !rb->sim || !obj_active(rb->go) || rb->type == RB_STATIC)
             continue;
@@ -247,15 +312,23 @@ void phys_step(float dt)
     }
     /* contacts */
     extern int g_autotest;
-    long long dbg_t0 = g_autotest ? (long long)sceKernelGetSystemTimeWide() : 0;
+    long long dbg_t0 = g_autotest ? (long long)vcpe_time_us() : 0;
     gather_valid = -1;
     gather(1);
-    long long dbg_t1 = g_autotest ? (long long)sceKernelGetSystemTimeWide() : 0;
+    long long dbg_t1 = g_autotest ? (long long)vcpe_time_us() : 0;
+    if (gather_valid<0) { vcpe_observe_end(VCPE_COST_CPU,observed); return; }
+    int use_grid=grid_enabled && vcpe_grid_begin(&spatial,ncg)==0;
+    if (grid_enabled && !use_grid) phys_stat_grid_fallbacks++;
+    if (use_grid) for (int i=0;i<ncg;i++) vcpe_grid_set(&spatial,i,cg[i].x,cg[i].y,cg[i].hx,cg[i].hy);
+    phys_stat_candidates=0;
     ncur = 0;
     for (int i = 0; i < ncg; i++) {
         CG *a = &cg[i];
         int adyn = dynamic_body(a->body);
-        for (int j = i + 1; j < ncg; j++) {
+        if (use_grid) vcpe_grid_query(&spatial,i);
+        for (int j = use_grid ? vcpe_grid_next(&spatial,i+1) : i+1; j < ncg;
+             j = use_grid ? vcpe_grid_next(&spatial,j+1) : j+1) {
+            phys_stat_candidates++;
             CG *b = &cg[j];
             if (a->body >= 0 && a->body == b->body)
                 continue;
@@ -278,7 +351,7 @@ void phys_step(float dt)
             if (!sep(a, b, &px, &py))
                 continue;
             if (trig) {
-                pair_add(a->col, b->col);
+                if (!pair_add(a->col, b->col)) continue;
                 uint32_t key = pairs_cur[ncur - 1];
                 if (!pair_was(key)) {
                     g_trigger_enter(a->go, b->go, b->col);
@@ -309,7 +382,12 @@ void phys_step(float dt)
                 float vn = -(bb->vx * nx + bb->vy * ny);
                 if (vn < 0) { bb->vx += vn * nx; bb->vy += vn * ny; }
             }
-            pair_add(a->col, b->col);
+            if (use_grid) {
+                vcpe_grid_set(&spatial,i,a->x,a->y,a->hx,a->hy);
+                vcpe_grid_set(&spatial,j,b->x,b->y,b->hx,b->hy);
+                vcpe_grid_query(&spatial,i); /* resolution can create a later-index contact this same step */
+            }
+            if (!pair_add(a->col, b->col)) continue;
             uint32_t key = pairs_cur[ncur - 1];
             if (!pair_was(key)) {
                 g_collision_enter(a->go, b->go, rel);
@@ -318,11 +396,12 @@ void phys_step(float dt)
         }
     }
     gather_valid = -1;
-    qsort(pairs_cur, ncur, sizeof(uint32_t), pair_cmp);
+    if (ncur>1) qsort(pairs_cur, ncur, sizeof(uint32_t), pair_cmp);
     uint32_t *t = pairs_prev; pairs_prev = pairs_cur; pairs_cur = t;
     nprev = ncur;
+    vcpe_observe_end(VCPE_COST_CPU,observed);
     if (g_autotest) {
-        long long t2 = sceKernelGetSystemTimeWide();
+        long long t2 = (long long)vcpe_time_us();
         if (t2 - dbg_t0 > 50000)
             printf("[aw] slow phys: gather %lld us, pairs+events %lld us, ncg %d ncol %d pairs %d prev %d\n", dbg_t1 - dbg_t0, t2 - dbg_t1, ncg, W.ncol, ncur, nprev);
     }
@@ -340,7 +419,7 @@ void phys_forget_pairs(int col)
 }
 
 /* ------------------------------------------------------------------ bodies */
-int phys_body(int go) { return (go >= 0 && go < W.nobj) ? W.obj[go].rb : -1; }
+int phys_body(int go) { return (go >= 0 && go < W.nobj && W.obj[go].rb<nbodies) ? W.obj[go].rb : -1; }
 
 void phys_velocity(int go, float *vx, float *vy)
 {
@@ -417,6 +496,7 @@ int phys_overlap_circle(float x, float y, float r, int mask, int *col_out)
     return -1;
 }
 
+/* Ray against one shape (inflated by a radius for circle casts): distance along the ray to the hit. */
 static int ray_shape(const CG *g, float ox, float oy, float dx, float dy, float inflate, float *t)
 {
     if (g->kind == COL_CIRCLE) {
@@ -479,6 +559,7 @@ static int cast(float x, float y, float r, float dx, float dy, float dist, int m
     return cg[best].go;
 }
 
+/* Physics2D.Raycast / CircleCast: closest hit among the shapes whose layer is in mask. */
 int phys_raycast(float x, float y, float dx, float dy, float dist, int mask, float *hx, float *hy, int *col_out)
 {
     return cast(x, y, 0, dx, dy, dist, mask, hx, hy, col_out);
